@@ -12,6 +12,7 @@
   <a href="https://duty1g.online"><img src="https://img.shields.io/badge/Red-Team-red" alt="Red Team"/></a>
   <a href="https://duty1g.online"><img src="https://img.shields.io/badge/Reverse%20Engineering-purple" alt="Reverse Engineering"/></a>
   <a href="https://twitter.com/duty_1g"><img src="https://img.shields.io/twitter/follow/duty_1g.svg?logo=twitter" alt="Twitter"/></a>
+  <a href="https://github.com/reacher-z/Awesome-REA"><img src="https://raw.githubusercontent.com/reacher-z/Awesome-REA/main/assets/featured-by-awesome-rea-inline.svg" alt="Featured by Awesome REA" width="184" height="20"></a>
 </p>
 
 <p align="center">
