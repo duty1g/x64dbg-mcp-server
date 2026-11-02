@@ -11,6 +11,11 @@ const tools_mod = @import("mcp/tools.zig");
 const PLUGIN_NAME = "x64dbg-MCP Server";
 const PLUGIN_VERSION = 1;
 
+// x64dbg's command namespace is flat and global, so the commands of
+// this plugin carry the plugin name as their namespace.
+const COMMAND_START: [*:0]const u8 = "mcpserver.start\x00";
+const COMMAND_STOP: [*:0]const u8 = "mcpserver.stop\x00";
+
 var plugin_handle: c_int = 0;
 var main_menu: c_int = 0;
 var host_hwnd: usize = 0;
@@ -129,12 +134,23 @@ export fn pluginit(initStruct: *bridge.PLUG_INITSTRUCT) callconv(.c) c_int {
     plugin_handle = initStruct.pluginHandle;
     bridge.logPuts("[x64dbg-MCP Server] Plugin initialized.\x00");
 
-    _ = bridge._plugin_registercommand(plugin_handle, "StartMCPServer\x00", cmdStartServer, 0);
-    bridge.logPuts("[x64dbg-MCP Server] Command \"StartMCPServer\" registered!\x00");
-    _ = bridge._plugin_registercommand(plugin_handle, "StopMCPServer\x00", cmdStopServer, 0);
-    bridge.logPuts("[x64dbg-MCP Server] Command \"StopMCPServer\" registered!\x00");
+    // x64dbg has one flat command namespace: a command name that
+    // another plugin already registered cannot be registered twice, and
+    // the registration fails silently.  The commands are therefore
+    // namespaced with the plugin name.
+    registerCommand(COMMAND_START, cmdStartServer);
+    registerCommand(COMMAND_STOP, cmdStopServer);
 
     return 1;
+}
+
+/// Register a command and report whether it actually was registered.
+fn registerCommand(name: [*:0]const u8, cb: bridge.CBPLUGINCOMMAND) void {
+    const ok = bridge._plugin_registercommand(plugin_handle, name, cb, 0) != 0;
+    const text = if (ok) "registered!" else "could not be registered, the name is already taken!";
+    var buf: [192]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "[x64dbg-MCP Server] Command \"{s}\" {s}\x00", .{ std.mem.span(name), text }) catch return;
+    bridge.logPuts(@ptrCast(msg.ptr));
 }
 
 export fn plugsetup(setupStruct: *bridge.PLUG_SETUPSTRUCT) callconv(.c) void {
@@ -206,8 +222,8 @@ export fn plugsetup(setupStruct: *bridge.PLUG_SETUPSTRUCT) callconv(.c) void {
 
 export fn plugstop() callconv(.c) c_int {
     mcp.stop();
-    _ = bridge._plugin_unregistercommand(plugin_handle, "StartMCPServer\x00");
-    _ = bridge._plugin_unregistercommand(plugin_handle, "StopMCPServer\x00");
+    _ = bridge._plugin_unregistercommand(plugin_handle, COMMAND_START);
+    _ = bridge._plugin_unregistercommand(plugin_handle, COMMAND_STOP);
     bridge.logPuts("[x64dbg-MCP Server] Plugin stopped.\x00");
     return 1;
 }
