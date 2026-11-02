@@ -121,7 +121,7 @@ WaitForEvent (timeoutMs: 120000)  — keep watching
 
 ---
 
-## Rule 4: All 84 Tools Reference
+## Rule 4: All 80 Tools Reference
 
 Every tool response includes a `[state]` line showing current debugger status and any `[event:*]` lines with queued events. You always know where you are.
 
@@ -133,15 +133,15 @@ Every tool response includes a `[state]` line showing current debugger status an
 | `AttachProcess` | `pid` | Attach to a running process by PID |
 | `run` | `timeoutMs?` (default 300000) | Resume execution (F9). Blocks until target pauses or timeout |
 | `PauseDebug` | — | Pause the target (F12) |
-| `WaitForPause` | `timeout?` (ms, default 10000) | Block until target pauses (breakpoint/exception) |
+| `WaitForPause` | `timeoutMs?` (default 30000) | Block until target pauses (breakpoint/exception) |
 | `StopDebug` | — | Terminate debug session |
 | `RestartDebug` | — | Restart debug session |
 | `ExecuteDebuggerCommand` | `command` | Run any x64dbg command string. Blocks if target becomes RUNNING |
 | `EvalExpression` | `expression` | Evaluate expression (address, register, symbol, arithmetic) |
 | `Echo` | `message` | Echo input back (connectivity test) |
-| `ListCommandsByCategory` | `category?` | List available MCP tools |
+| `ListCommandsByCategory` | `category?` | List the MCP tools, grouped by category |
 | `SearchForStrings` | `searchText` | Search process memory for text |
-| `GetEventLog` | `count?` (default 20) | Last N debugger events |
+| `GetEventLog` | `count?` (default: all) | Last N debugger events |
 | `ClearEventLog` | — | Clear the event log |
 | `WaitForEvent` | `timeoutMs?` (default 30000) | Long-poll for debugger events. For HTTP clients to watch state changes |
 
@@ -177,7 +177,7 @@ Every tool response includes a `[state]` line showing current debugger status an
 ### Disassembly & Code (requires PAUSED)
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `Disassemble` | `address?`, `count?` (default 16) | Disassemble N instructions |
+| `Disassemble` | `address?`, `count?` (default 10) | Disassemble N instructions |
 | `DisassembleFunction` | `address?` | Disassemble entire function (needs analysis first) |
 | `GetCurrentAddress` | — | Current EIP/RIP with label and comment |
 | `GetFunctions` | `module?` | List analyzed functions with addresses |
@@ -198,7 +198,7 @@ Every tool response includes a `[state]` line showing current debugger status an
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `ReadMemory` | `address`, `size?` (default 64) | Hex dump of process memory |
-| `WriteMemToAddress` | `address`, `bytes` (hex) | Patch memory with hex bytes |
+| `WriteMemToAddress` | `address`, `byteString` (hex) | Patch memory with hex bytes |
 | `AllocateMemory` | `size` | Allocate memory in target process |
 | `FreeMemory` | `address` | Free allocated memory |
 | `GetMemoryMap` | — | Memory regions with addresses, sizes, protection |
@@ -232,7 +232,7 @@ Every tool response includes a `[state]` line showing current debugger status an
 ### Bookmarks & Comments (requires debug session)
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `CommentOrLabelAtAddress` | `address`, `text`, `type` (comment/label) | Add comment/label in disassembly |
+| `CommentOrLabelAtAddress` | `address`, `value`, `mode` (Comment/Label) | Add comment/label in disassembly |
 | `SetBookmark` | `address` | Set a bookmark |
 | `DeleteBookmark` | `address` | Delete a bookmark |
 | `ListBookmarks` | — | List all bookmarks |

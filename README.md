@@ -35,7 +35,7 @@ Built with [Zig](https://ziglang.org/) — zero dependencies, single-binary outp
 
 ## Features
 
-- **84 MCP Tools:** Full debugger control — disassembly, stepping, breakpoints, memory allocation, registers, modules, threads, call stack, pattern scanning, string extraction, xrefs, symbols, bookmarks, PE analysis, OEP detection, module dumping, PEB/SEH inspection, tracing, and more.
+- **80 MCP Tools:** Full debugger control — disassembly, stepping, breakpoints, memory allocation, registers, modules, threads, call stack, pattern scanning, string extraction, xrefs, symbols, bookmarks, PE analysis, OEP detection, module dumping, PEB/SEH inspection, tracing, and more.
 - **22 Event Callbacks:** Full debugger event coverage — init, stop, breakpoint, exception, step, attach/detach, DLL load/unload, threads, and more.
 - **Zero Dependencies:** Pure native plugin, no runtime or framework needed.
 - **x32 and x64:** Single codebase, builds both architectures from one command.
@@ -53,9 +53,11 @@ Download the latest release or build from source:
 1. Copy the contents of `dist/` into your x64dbg root folder (deploys both x32 and x64)
 2. Launch x64dbg
 
-The MCP server starts automatically. Default ports:
-- **x64:** `0.0.0.0:9094`
-- **x32:** `0.0.0.0:9095`
+The MCP server starts automatically. Default bind address and ports:
+- **x64:** `127.0.0.1:9094`
+- **x32:** `127.0.0.1:9095`
+
+The bind address is the loopback address, so only clients on this machine can reach the server. To reach it from WSL or another machine, set the bind address to `0.0.0.0` in the config dialog. When the configured port is already taken, the server binds the next free port and logs the port it actually listens on.
 
 
 ## Usage
@@ -116,7 +118,7 @@ AI: [calls StepOver x3, GetCallStack]
 
 ## Tools
 
-72 MCP tools covering the full x64dbg debugging workflow.
+80 MCP tools covering the full x64dbg debugging workflow.
 
 ### Always available
 | Tool | Description |
@@ -124,7 +126,7 @@ AI: [calls StepOver x3, GetCallStack]
 | `GetDebugState` | Current debugger state, PID, instruction pointer |
 | `LoadBinary` | Load an executable into the debugger |
 | `ExecuteDebuggerCommand` | Run any x64dbg command |
-| `ListCommandsByCategory` | List available MCP tools |
+| `ListCommandsByCategory` | List the MCP tools, grouped by category (or one category) |
 | `SearchForStrings` | Search process memory for text |
 | `GetEventLog` | Last N debugger events (exceptions, breakpoints, DLL loads) |
 | `ClearEventLog` | Clear the event log |
@@ -212,18 +214,22 @@ AI: [calls StepOver x3, GetCallStack]
 Go to **Plugins > x64dbg-MCP Server > Configure MCP Server...** to change the bind address, port, and auth token.
 
 - `0.0.0.0` — listen on all interfaces (for WSL/remote access)
-- `127.0.0.1` — local-only access
+- `127.0.0.1` — local-only access (the default)
+
+The server can also be started and stopped from the x64dbg command line with `mcpserver.start` and `mcpserver.stop`.
 
 ### Authentication
 
 A Bearer token is auto-generated on first run and required on every request. The MCP server has full debugger control and can read/write process memory — all requests without a valid token receive `401 Unauthorized`. Click **Generate** in the config dialog to rotate the token, or **Copy** to copy it to clipboard. Clients must include the token as an `Authorization: Bearer <token>` header.
+
+The token is also required on the CORS preflight (`OPTIONS`), so a browser on another origin cannot use the server: the `Access-Control-Allow-Origin` header is only sent for the origin the server is reachable at (`http://127.0.0.1:<port>` and `http://localhost:<port>` with the default bind address).
 
 Changes take effect immediately — the server auto-restarts on save. Config is persisted to `mcp_config.json` next to the x64dbg executable.
 
 
 ## Building
 
-Requires [Zig 0.16-dev](https://ziglang.org/download/) or later. Builds on Windows, WSL, Linux, or macOS.
+Requires [Zig 0.14.0](https://ziglang.org/download/) or later (CI builds 0.14.0 and 0.17.0). Builds on Windows, WSL, Linux, or macOS.
 
 ```console
 zig build -Doptimize=ReleaseSafe --prefix dist
@@ -251,7 +257,9 @@ dist/
     ├── core/
     │   ├── bridge.zig            # x64dbg SDK bindings (runtime-resolved)
     │   ├── config.zig            # Win32 config dialog and persistence
-    │   └── mcp_server.zig        # HTTP server and JSON-RPC dispatch
+    │   ├── mcp_server.zig        # HTTP server and JSON-RPC dispatch
+    │   ├── sync.zig              # SRWLOCK-based mutex for the shared state
+    │   └── winsock.zig           # Winsock entry points used by the server
     ├── mcp/
     │   ├── json.zig              # JSON writer and parser helpers
     │   └── tools.zig             # MCP tool definitions and handlers
