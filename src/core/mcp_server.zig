@@ -641,15 +641,13 @@ fn handleClient(sock: SOCKET) void {
 
     const request = recv_result.buf[0..recv_result.len];
     const method_line = getFirstLine(request);
+    const headers_slice = if (findHeaderEnd(request)) |he| request[0..he] else request;
 
-    if (std.mem.startsWith(u8, method_line, "OPTIONS ")) {
-        wsSend(sock, "HTTP/1.1 204 No Content\r\n" ++ CORS_HEADERS ++ "\r\n");
-        _ = ws2.closesocket(sock);
-        return;
-    }
+    // The CORS headers of this request.  Only the origin the server is
+    // reachable at is allowed.
+    setCorsHeaders(parseHeaderValue(headers_slice, "Origin"));
 
     {
-        const headers_slice = if (findHeaderEnd(request)) |he| request[0..he] else request;
         const tok = parseHeaderValue(headers_slice, "Authorization");
         var authorized = false;
         if (tok) |t| {
@@ -661,16 +659,26 @@ fn handleClient(sock: SOCKET) void {
             }
         }
         if (!authorized) {
-            wsSend(sock, "HTTP/1.1 401 Unauthorized\r\n" ++ CORS_HEADERS ++ "Content-Length: 24\r\n\r\n{\"error\":\"Unauthorized\"}");
+            sendSimple(sock, "401 Unauthorized", "Content-Length: 24\r\n");
+            wsSend(sock, "{\"error\":\"Unauthorized\"}");
             _ = ws2.closesocket(sock);
             return;
         }
     }
 
+    // The preflight is authenticated like every other request: the
+    // server must not be usable from a web page that a user happens to
+    // have open.
+    if (std.mem.startsWith(u8, method_line, "OPTIONS ")) {
+        sendSimple(sock, "204 No Content", "");
+        _ = ws2.closesocket(sock);
+        return;
+    }
+
     if (std.mem.startsWith(u8, method_line, "GET ")) {
         const path = getPath(method_line);
         if (std.mem.indexOf(u8, path, ".well-known") != null) {
-            wsSend(sock, "HTTP/1.1 404 Not Found\r\n" ++ CORS_HEADERS ++ "Content-Length: 0\r\n\r\n");
+            sendSimple(sock, "404 Not Found", "Content-Length: 0\r\n");
             _ = ws2.closesocket(sock);
             return;
         }
@@ -686,7 +694,7 @@ fn handleClient(sock: SOCKET) void {
     if (std.mem.startsWith(u8, method_line, "POST ")) {
         const path = getPath(method_line);
         if (std.mem.indexOf(u8, path, ".well-known") != null) {
-            wsSend(sock, "HTTP/1.1 404 Not Found\r\n" ++ CORS_HEADERS ++ "Content-Length: 0\r\n\r\n");
+            sendSimple(sock, "404 Not Found", "Content-Length: 0\r\n");
             _ = ws2.closesocket(sock);
             return;
         }
@@ -703,13 +711,13 @@ fn handleClient(sock: SOCKET) void {
                 handleJsonRpc(sock, body);
             }
         } else {
-            wsSend(sock, "HTTP/1.1 400 Bad Request\r\n" ++ CORS_HEADERS ++ "Content-Length: 0\r\n\r\n");
+            sendSimple(sock, "400 Bad Request", "Content-Length: 0\r\n");
         }
         _ = ws2.closesocket(sock);
         return;
     }
 
-    wsSend(sock, "HTTP/1.1 405 Method Not Allowed\r\n" ++ CORS_HEADERS ++ "Content-Length: 0\r\n\r\n");
+    sendSimple(sock, "405 Method Not Allowed", "Content-Length: 0\r\n");
     _ = ws2.closesocket(sock);
 }
 
@@ -728,7 +736,7 @@ fn handleJsonRpc(sock: SOCKET, body: []const u8) void {
     const id = json_mod.getObjectField(root, "id");
 
     if (id == null or std.mem.startsWith(u8, method_val, "notifications/")) {
-        wsSend(sock, "HTTP/1.1 202 Accepted\r\n" ++ CORS_HEADERS ++ "Content-Length: 0\r\n\r\n");
+        sendSimple(sock, "202 Accepted", "Content-Length: 0\r\n");
         return;
     }
 
@@ -782,15 +790,14 @@ fn handleToolsCall(sock: SOCKET, id: ?std.json.Value, root: std.json.Value) void
 
 fn handleSseConnect(sock: SOCKET) void {
     const slot = sseAddClient(sock) orelse {
-        wsSend(sock, "HTTP/1.1 503 Service Unavailable\r\n" ++ CORS_HEADERS ++ "Content-Length: 0\r\n\r\n");
+        sendSimple(sock, "503 Service Unavailable", "Content-Length: 0\r\n");
         _ = ws2.closesocket(sock);
         return;
     };
 
     const session_id = slot.session_id[0..slot.session_len];
 
-    wsSend(sock, "HTTP/1.1 200 OK\r\n" ++ CORS_HEADERS ++
-        "Content-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n");
+    sendSimple(sock, "200 OK", "Content-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n");
 
     var endpoint_buf: [128]u8 = undefined;
     const endpoint = std.fmt.bufPrint(&endpoint_buf, "/messages?sessionId={s}", .{session_id}) catch "/messages";
@@ -827,7 +834,7 @@ fn handleSseMessage(sock: SOCKET, body: []const u8, session_id: ?[]const u8) voi
 
     // Notifications get 202
     if (id == null or std.mem.startsWith(u8, method_val, "notifications/")) {
-        wsSend(sock, "HTTP/1.1 202 Accepted\r\n" ++ CORS_HEADERS ++ "Content-Length: 0\r\n\r\n");
+        sendSimple(sock, "202 Accepted", "Content-Length: 0\r\n");
         return;
     }
 
@@ -868,7 +875,7 @@ fn handleSseMessage(sock: SOCKET, body: []const u8, session_id: ?[]const u8) voi
     }
 
     // Also respond on the POST connection
-    wsSend(sock, "HTTP/1.1 200 OK\r\n" ++ CORS_HEADERS ++ "Content-Type: application/json\r\nContent-Length: 0\r\n\r\n");
+    sendSimple(sock, "200 OK", "Content-Type: application/json\r\nContent-Length: 0\r\n");
 }
 
 fn buildInitializeResult(w: *JsonWriter) void {
@@ -928,6 +935,29 @@ fn buildToolsListResult(w: *JsonWriter) void {
     }
     w.endArray();
     w.endObject();
+}
+
+test "only the origin the server is reachable at is allowed" {
+    // The server binds the loopback address by default.
+    try std.testing.expect(originAllowedFor("http://127.0.0.1:9094", 9094, "127.0.0.1"));
+    try std.testing.expect(originAllowedFor("http://localhost:9094", 9094, "127.0.0.1"));
+
+    // Another host, another port, another scheme: not this server.
+    try std.testing.expect(!originAllowedFor("http://evil.example:9094", 9094, "127.0.0.1"));
+    try std.testing.expect(!originAllowedFor("http://127.0.0.1:9095", 9094, "127.0.0.1"));
+    try std.testing.expect(!originAllowedFor("https://127.0.0.1:9094", 9094, "127.0.0.1"));
+    try std.testing.expect(!originAllowedFor("file:///etc/passwd", 9094, "127.0.0.1"));
+    try std.testing.expect(!originAllowedFor("null", 9094, "127.0.0.1"));
+    try std.testing.expect(!originAllowedFor("", 9094, "127.0.0.1"));
+
+    // Bound to every interface: the loopback names are still the only
+    // ones answered.
+    try std.testing.expect(originAllowedFor("http://127.0.0.1:9094", 9094, "0.0.0.0"));
+    try std.testing.expect(!originAllowedFor("http://192.168.0.5:9094", 9094, "0.0.0.0"));
+
+    // Bound to a specific address: only that address is answered.
+    try std.testing.expect(originAllowedFor("http://192.168.0.5:9094", 9094, "192.168.0.5"));
+    try std.testing.expect(!originAllowedFor("http://127.0.0.1:9094", 9094, "192.168.0.5"));
 }
 
 test "the tool list comes out complete and parseable" {
@@ -1067,15 +1097,113 @@ fn parseHeaderValue(headers: []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
+// ── CORS ────────────────────────────────────────────────────────────
+//
+// The server drives a debugger: it writes memory, sets breakpoints and
+// runs commands in the debuggee.  It therefore does not answer with a
+// wildcard origin any more.  The Origin header is echoed back only when
+// it names the origin the server itself is reachable at — the bind
+// address, on the port it listens on.  Every other origin gets no CORS
+// headers at all, which makes the browser refuse the response.
+//
+// The headers belong to one request and every request is handled by
+// exactly one thread, so they are kept in thread-local storage.
+const CORS_METHODS = "GET, POST, OPTIONS, DELETE";
+const CORS_REQUEST_HEADERS = "Content-Type, Authorization, Mcp-Session-Id, Accept";
+
+threadlocal var cors_buf: [512]u8 = undefined;
+threadlocal var cors_len: usize = 0;
+
+/// The CORS headers of the request that is being handled.
+fn corsHeaders() []const u8 {
+    return cors_buf[0..cors_len];
+}
+
+/// Build the CORS headers of a request from its Origin header.
+fn setCorsHeaders(origin: ?[]const u8) void {
+    cors_len = 0;
+    const o = origin orelse return;
+    if (!originAllowed(o)) return;
+    var pos: usize = 0;
+    pos += copyHeader(cors_buf[pos..], "Access-Control-Allow-Origin: ");
+    pos += copyHeader(cors_buf[pos..], o);
+    pos += copyHeader(cors_buf[pos..], "\r\n");
+    pos += copyHeader(cors_buf[pos..], "Vary: Origin\r\n");
+    pos += copyHeader(cors_buf[pos..], "Access-Control-Allow-Methods: " ++ CORS_METHODS ++ "\r\n");
+    pos += copyHeader(cors_buf[pos..], "Access-Control-Allow-Headers: " ++ CORS_REQUEST_HEADERS ++ "\r\n");
+    pos += copyHeader(cors_buf[pos..], "Access-Control-Expose-Headers: Mcp-Session-Id\r\n");
+    cors_len = pos;
+}
+
+fn copyHeader(out: []u8, text: []const u8) usize {
+    const n = @min(out.len, text.len);
+    @memcpy(out[0..n], text[0..n]);
+    return n;
+}
+
+/// Whether the Origin header names the origin the server is reachable
+/// at: the host it is bound to, on the port it listens on.
+fn originAllowed(origin: []const u8) bool {
+    var ip_buf: [64]u8 = undefined;
+    var port: u16 = 0;
+    const ip_len = bindTarget(&ip_buf, &port);
+    return originAllowedFor(origin, currentBoundPort(), ip_buf[0..ip_len]);
+}
+
+/// The origin check on its own, without the server state.
+fn originAllowedFor(origin: []const u8, listen_port: u16, bind_ip: []const u8) bool {
+    if (origin.len == 0 or origin.len > 128) return false;
+    const scheme_end = std.mem.indexOf(u8, origin, "://") orelse return false;
+    const scheme = origin[0..scheme_end];
+    // The server speaks plain HTTP, so only an http origin can refer
+    // to it.
+    if (!std.mem.eql(u8, scheme, "http")) return false;
+    var host = origin[scheme_end + 3 ..];
+    if (std.mem.indexOfScalar(u8, host, '/')) |slash| host = host[0..slash];
+
+    if (listen_port == 0) return false;
+    var origin_port = listen_port;
+    if (std.mem.lastIndexOfScalar(u8, host, ':')) |colon| {
+        origin_port = std.fmt.parseInt(u16, host[colon + 1 ..], 10) catch return false;
+        host = host[0..colon];
+    }
+    if (origin_port != listen_port) return false;
+    return hostAllowedFor(host, bind_ip);
+}
+
+/// Whether the host of an Origin header is one the server answers to.
+fn hostAllowed(host: []const u8) bool {
+    var ip_buf: [64]u8 = undefined;
+    var port: u16 = 0;
+    const ip_len = bindTarget(&ip_buf, &port);
+    return hostAllowedFor(host, ip_buf[0..ip_len]);
+}
+
+/// The host check on its own, without the server state.
+fn hostAllowedFor(host: []const u8, bind_ip: []const u8) bool {
+    if (std.mem.eql(u8, host, bind_ip)) return true;
+    // The loopback names are answered when the server is bound to the
+    // loopback address or to every interface.
+    const local = std.mem.eql(u8, bind_ip, "127.0.0.1") or std.mem.eql(u8, bind_ip, "0.0.0.0");
+    if (local and (std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "localhost"))) return true;
+    return false;
+}
+
 // ── HTTP helpers ────────────────────────────────────────────────────
 
-const CORS_HEADERS = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS, DELETE\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, Mcp-Session-Id, Accept\r\nAccess-Control-Expose-Headers: Mcp-Session-Id\r\n";
+/// Send a response with the given status line, the CORS headers of the
+/// current request and the given extra headers.
+fn sendSimple(sock: SOCKET, status: []const u8, extra: []const u8) void {
+    var buf: [768]u8 = undefined;
+    const resp = std.fmt.bufPrint(&buf, "HTTP/1.1 {s}\r\n{s}{s}\r\n", .{ status, corsHeaders(), extra }) catch return;
+    wsSend(sock, resp);
+}
 
 fn sendServerInfo(sock: SOCKET) void {
     var body_buf: [256]u8 = undefined;
     const body = std.fmt.bufPrint(&body_buf, "{{\"name\":\"{s}\",\"version\":\"{s}\",\"transport\":\"streamable-http\",\"endpoint\":\"/\"}}", .{ SERVER_NAME, SERVER_VERSION }) catch return;
-    var buf: [512]u8 = undefined;
-    const resp = std.fmt.bufPrint(&buf, "HTTP/1.1 200 OK\r\n" ++ CORS_HEADERS ++ "Content-Type: application/json\r\nContent-Length: {d}\r\n\r\n{s}", .{ body.len, body }) catch return;
+    var buf: [768]u8 = undefined;
+    const resp = std.fmt.bufPrint(&buf, "HTTP/1.1 200 OK\r\n{s}Content-Type: application/json\r\nContent-Length: {d}\r\n\r\n{s}", .{ corsHeaders(), body.len, body }) catch return;
     wsSend(sock, resp);
 }
 
@@ -1093,8 +1221,8 @@ fn sendJsonRpcResult(sock: SOCKET, id: ?std.json.Value, result_json: []const u8)
     w.raw("}");
 
     const body_slice = w.slice();
-    var header_buf: [512]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\n" ++ CORS_HEADERS ++ "Content-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{body_slice.len}) catch return;
+    var header_buf: [768]u8 = undefined;
+    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\n{s}Content-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{ corsHeaders(), body_slice.len }) catch return;
 
     wsSend(sock, header);
     wsSend(sock, body_slice);
@@ -1115,16 +1243,16 @@ fn sendJsonRpcError(sock: SOCKET, id: ?std.json.Value, code: i32, message: []con
         // The message did not fit: send a short error instead of a
         // truncated, unparseable document.
         const fallback = "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,\"message\":\"Error message too long\"}}";
-        var header_buf: [512]u8 = undefined;
-        const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\n" ++ CORS_HEADERS ++ "Content-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{fallback.len}) catch return;
+        var header_buf: [768]u8 = undefined;
+        const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\n{s}Content-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{ corsHeaders(), fallback.len }) catch return;
         wsSend(sock, header);
         wsSend(sock, fallback);
         return;
     }
 
     const body_slice = w.slice();
-    var header_buf: [512]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\n" ++ CORS_HEADERS ++ "Content-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{body_slice.len}) catch return;
+    var header_buf: [768]u8 = undefined;
+    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\n{s}Content-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{ corsHeaders(), body_slice.len }) catch return;
 
     wsSend(sock, header);
     wsSend(sock, body_slice);
