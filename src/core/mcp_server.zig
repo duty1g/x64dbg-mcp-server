@@ -6,7 +6,7 @@ const tools_mod = @import("../mcp/tools.zig");
 const json_mod = @import("../mcp/json.zig");
 const JsonWriter = json_mod.JsonWriter;
 
-const ws2 = std.os.windows.ws2_32;
+const ws2 = @import("winsock.zig");
 const SOCKET = ws2.SOCKET;
 const INVALID_SOCKET = ws2.INVALID_SOCKET;
 
@@ -33,9 +33,12 @@ pub var server_running: bool = false;
 var listen_sock: SOCKET = INVALID_SOCKET;
 
 pub var server_port: u16 = 9094;
-var server_ip: [64]u8 = .{ '1', '2', '7', '.', '0', '.', '0', '.', '1' } ++ .{0} ** 55;
+// "127.0.0.1" followed by zero padding, so the default bind address is
+// already correct before setConfig() runs.
+const ip_default_padding: [55]u8 = @splat(0);
+var server_ip: [64]u8 = .{ '1', '2', '7', '.', '0', '.', '0', '.', '1' } ++ ip_default_padding;
 var server_ip_len: usize = 9;
-var auth_token: [64]u8 = .{0} ** 64;
+var auth_token: [64]u8 = @splat(0);
 var auth_token_len: usize = 0;
 
 pub fn setConfig(ip: []const u8, port: u16, token: []const u8) void {
@@ -85,7 +88,7 @@ fn parseIpAddr(ip: []const u8) u32 {
 const MAX_PENDING_EVENTS = 16;
 const MAX_EVENT_LEN = 128;
 var pending_events: [MAX_PENDING_EVENTS][MAX_EVENT_LEN]u8 = undefined;
-var pending_event_lens: [MAX_PENDING_EVENTS]usize = .{0} ** MAX_PENDING_EVENTS;
+var pending_event_lens: [MAX_PENDING_EVENTS]usize = @splat(0);
 var pending_head: usize = 0;
 var pending_count: usize = 0;
 
@@ -141,9 +144,9 @@ fn pendingDrain(w: *JsonWriter) void {
 
 // ── SSE client tracking ────────────────────────────────────────────
 const MAX_SSE_CLIENTS = 8;
-var sse_clients: [MAX_SSE_CLIENTS]SOCKET = .{INVALID_SOCKET} ** MAX_SSE_CLIENTS;
+var sse_clients: [MAX_SSE_CLIENTS]SOCKET = @splat(INVALID_SOCKET);
 var sse_session_ids: [MAX_SSE_CLIENTS][32]u8 = undefined;
-var sse_session_lens: [MAX_SSE_CLIENTS]usize = .{0} ** MAX_SSE_CLIENTS;
+var sse_session_lens: [MAX_SSE_CLIENTS]usize = @splat(0);
 var sse_next_id: u32 = 1;
 
 fn sseAddClient(sock: SOCKET) ?usize {
@@ -335,7 +338,7 @@ fn serverThreadProc(_: ?*anyopaque) callconv(.winapi) u32 {
 }
 
 fn clientThreadProc(param: ?*anyopaque) callconv(.winapi) u32 {
-    const sock: SOCKET = @ptrCast(@alignCast(param));
+    const sock: SOCKET = @intCast(@intFromPtr(param.?));
     handleClient(sock);
     return 0;
 }
@@ -348,7 +351,7 @@ fn serverLoop() void {
         return;
     }
 
-    const sock = ws2.socket(ws2.AF.INET, ws2.SOCK.STREAM, 0);
+    const sock = ws2.socket(@intCast(ws2.AF_INET), ws2.SOCK_STREAM, 0);
     if (sock == INVALID_SOCKET) {
         server_running = false;
         bridge.logPuts("[x64dbg-MCP Server] socket() failed.\x00");
@@ -363,15 +366,15 @@ fn serverLoop() void {
     }
 
     const one: i32 = 1;
-    _ = ws2.setsockopt(sock, ws2.SOL.SOCKET, ws2.SO.REUSEADDR, @ptrCast(&one), @sizeOf(i32));
+    _ = ws2.setsockopt(sock, ws2.SOL_SOCKET, ws2.SO_REUSEADDR, @ptrCast(&one), @sizeOf(i32));
 
-    var addr: ws2.sockaddr.in = .{
-        .family = ws2.AF.INET,
+    var addr: ws2.SOCKADDR_IN = .{
+        .family = ws2.AF_INET,
         .port = ws2.htons(server_port),
         .addr = parseIpAddr(server_ip[0..server_ip_len]),
     };
 
-    if (ws2.bind(sock, @ptrCast(&addr), @sizeOf(ws2.sockaddr.in)) != 0) {
+    if (ws2.bind(sock, &addr, @sizeOf(ws2.SOCKADDR_IN)) != 0) {
         server_running = false;
         bridge.logPuts("[x64dbg-MCP Server] bind() failed.\x00");
         return;
@@ -392,7 +395,7 @@ fn serverLoop() void {
             continue;
         }
 
-        const h = CreateThread(null, 0, clientThreadProc, @ptrCast(@alignCast(client)), 0, null);
+        const h = CreateThread(null, 0, clientThreadProc, @ptrFromInt(client), 0, null);
         if (h == null) {
             _ = ws2.closesocket(client);
         } else {

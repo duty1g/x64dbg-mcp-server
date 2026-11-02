@@ -8,7 +8,11 @@
 
 const std = @import("std");
 const win = std.os.windows;
-const BOOL = win.BOOL;
+
+// The x64dbg bridge API returns C++ `bool` (one byte in AL).  Zig's
+// std.os.windows.BOOL changed shape between 0.14 and 0.17, so the plugin
+// uses a plain c_int and masks the low byte where it matters.
+const BOOL = c_int;
 const HMODULE = win.HMODULE;
 
 extern "kernel32" fn GetModuleHandleA(lpModuleName: ?[*:0]const u8) callconv(.winapi) ?HMODULE;

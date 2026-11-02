@@ -8,29 +8,37 @@ on:
 
 jobs:
   test:
-    name: Unit Tests
+    name: Unit Tests (Zig ${{ matrix.zig }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        zig: ['0.14.0', '0.17.0']
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v1
         with:
-          version: 0.14.0
+          version: ${{ matrix.zig }}
 
       - name: Run tests
         run: zig build test
 
   build:
-    name: Build Plugins
+    name: Build Plugins (Zig ${{ matrix.zig }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        zig: ['0.14.0', '0.17.0']
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v1
         with:
-          version: 0.14.0
+          version: ${{ matrix.zig }}
 
       - name: Build x32 and x64 plugins
         run: zig build -Doptimize=ReleaseFast

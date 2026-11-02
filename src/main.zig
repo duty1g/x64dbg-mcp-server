@@ -23,7 +23,7 @@ const EVENT_LOG_SIZE = 64;
 const EVENT_MSG_SIZE = 192;
 
 var event_log: [EVENT_LOG_SIZE][EVENT_MSG_SIZE]u8 = undefined;
-var event_log_lens: [EVENT_LOG_SIZE]usize = [_]usize{0} ** EVENT_LOG_SIZE;
+var event_log_lens: [EVENT_LOG_SIZE]usize = @splat(0);
 var event_log_head: usize = 0;
 var event_log_count: usize = 0;
 
