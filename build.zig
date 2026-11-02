@@ -75,4 +75,21 @@ pub fn build(b: *std.Build) void {
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
     test_step.dependOn(&run_tests.step);
+
+    // The JSON-RPC responses are built by the server module, and they
+    // are worth testing without a live debugger: the tool list has to
+    // come out complete and parseable.  The root is main.zig so that
+    // the whole plugin is inside the module path; the test blocks live
+    // in the file they cover.
+    const server_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    server_test_mod.linkSystemLibrary("kernel32", .{});
+    server_test_mod.linkSystemLibrary("ws2_32", .{});
+    server_test_mod.linkSystemLibrary("user32", .{});
+    const server_tests = b.addTest(.{ .root_module = server_test_mod });
+    const run_server_tests = b.addRunArtifact(server_tests);
+    test_step.dependOn(&run_server_tests.step);
 }

@@ -706,22 +706,29 @@ fn handleJsonRpc(sock: SOCKET, body: []const u8) void {
 }
 
 fn handleInitialize(sock: SOCKET, id: ?std.json.Value) void {
-    var buf: [4096]u8 = undefined;
-    var w = JsonWriter.init(&buf);
+    var buffer = json_mod.ByteBuffer.init(std.heap.page_allocator);
+    defer buffer.deinit();
+    var w = JsonWriter.initGrowable(&buffer);
     buildInitializeResult(&w);
     sendJsonRpcResult(sock, id, w.slice());
 }
 
 fn handleToolsList(sock: SOCKET, id: ?std.json.Value) void {
-    var buf: [65536]u8 = undefined;
-    var w = JsonWriter.init(&buf);
+    // The tool list grows with every tool that is added, so the
+    // response is written into a buffer that grows with it.  A fixed
+    // buffer would silently truncate the JSON once the list outgrows
+    // it, and the client would fail to parse the answer.
+    var buffer = json_mod.ByteBuffer.init(std.heap.page_allocator);
+    defer buffer.deinit();
+    var w = JsonWriter.initGrowable(&buffer);
     buildToolsListResult(&w);
     sendJsonRpcResult(sock, id, w.slice());
 }
 
 fn handleToolsCall(sock: SOCKET, id: ?std.json.Value, root: std.json.Value) void {
-    var buf: [131072]u8 = undefined;
-    var w = JsonWriter.init(&buf);
+    var buffer = json_mod.ByteBuffer.init(std.heap.page_allocator);
+    defer buffer.deinit();
+    var w = JsonWriter.initGrowable(&buffer);
     buildToolsCallResult(&w, root);
     const result_str = w.slice();
     if (std.mem.startsWith(u8, result_str, "{\"error\":")) {
@@ -785,8 +792,9 @@ fn handleSseMessage(sock: SOCKET, body: []const u8, session_id: ?[]const u8) voi
     }
 
     // Process the RPC call and build the result
-    var result_buf: [131072]u8 = undefined;
-    var rw = JsonWriter.init(&result_buf);
+    var result_buffer = json_mod.ByteBuffer.init(std.heap.page_allocator);
+    defer result_buffer.deinit();
+    var rw = JsonWriter.initGrowable(&result_buffer);
 
     if (std.mem.eql(u8, method_val, "initialize")) {
         buildInitializeResult(&rw);
@@ -803,8 +811,9 @@ fn handleSseMessage(sock: SOCKET, body: []const u8, session_id: ?[]const u8) voi
     }
 
     // Build full JSON-RPC response
-    var resp_buf: [131072]u8 = undefined;
-    var w = JsonWriter.init(&resp_buf);
+    var response_buffer = json_mod.ByteBuffer.init(std.heap.page_allocator);
+    defer response_buffer.deinit();
+    var w = JsonWriter.initGrowable(&response_buffer);
     w.raw("{\"jsonrpc\":\"2.0\",\"id\":");
     writeJsonValue(&w, id);
     w.raw(",\"result\":");
@@ -879,6 +888,26 @@ fn buildToolsListResult(w: *JsonWriter) void {
     }
     w.endArray();
     w.endObject();
+}
+
+test "the tool list comes out complete and parseable" {
+    var buffer = json_mod.ByteBuffer.init(std.testing.allocator);
+    defer buffer.deinit();
+    var w = JsonWriter.initGrowable(&buffer);
+    buildToolsListResult(&w);
+
+    try std.testing.expect(!w.isTruncated());
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buffer.slice(), .{});
+    defer parsed.deinit();
+
+    const tools = parsed.value.object.get("tools").?.array;
+    try std.testing.expectEqual(tools_mod.tools.len, tools.items.len);
+    for (tools.items, tools_mod.tools) |item, tool| {
+        try std.testing.expectEqualStrings(tool.name, item.object.get("name").?.string);
+        try std.testing.expect(item.object.get("description") != null);
+        try std.testing.expect(item.object.get("inputSchema") != null);
+    }
 }
 
 fn buildToolsCallResult(w: *JsonWriter, root: std.json.Value) void {
@@ -1011,8 +1040,12 @@ fn sendServerInfo(sock: SOCKET) void {
 }
 
 fn sendJsonRpcResult(sock: SOCKET, id: ?std.json.Value, result_json: []const u8) void {
-    var body_buf: [131072]u8 = undefined;
-    var w = JsonWriter.init(&body_buf);
+    // The envelope grows with the result: the result of a tool call is
+    // a JSON document that is escaped again here, so a fixed buffer
+    // would truncate the answer for large tool results.
+    var buffer = json_mod.ByteBuffer.init(std.heap.page_allocator);
+    defer buffer.deinit();
+    var w = JsonWriter.initGrowable(&buffer);
     w.raw("{\"jsonrpc\":\"2.0\",\"id\":");
     writeJsonValue(&w, id);
     w.raw(",\"result\":");
@@ -1037,6 +1070,17 @@ fn sendJsonRpcError(sock: SOCKET, id: ?std.json.Value, code: i32, message: []con
     w.raw(",\"message\":");
     w.writeString(message);
     w.raw("}}");
+
+    if (w.isTruncated()) {
+        // The message did not fit: send a short error instead of a
+        // truncated, unparseable document.
+        const fallback = "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,\"message\":\"Error message too long\"}}";
+        var header_buf: [512]u8 = undefined;
+        const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\n" ++ CORS_HEADERS ++ "Content-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{fallback.len}) catch return;
+        wsSend(sock, header);
+        wsSend(sock, fallback);
+        return;
+    }
 
     const body_slice = w.slice();
     var header_buf: [512]u8 = undefined;

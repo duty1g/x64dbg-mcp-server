@@ -1,21 +1,132 @@
 // Minimal JSON writer and parser for MCP protocol.
-// No allocations for writing (writes to a fixed buffer).
-// Parsing uses std.json.
+// The writer can either fill a fixed buffer or grow a ByteBuffer, so a
+// response that grows with the content (the tool list) cannot be
+// truncated.  Parsing uses std.json.
 
 const std = @import("std");
 
+/// A growable byte buffer.
+///
+/// std.ArrayList changed shape between Zig 0.14 and 0.17 (managed vs.
+/// unmanaged, different method signatures), so this buffer keeps its own
+/// small implementation and builds under both.
+pub const ByteBuffer = struct {
+    allocator: std.mem.Allocator,
+    buf: []u8 = &.{},
+    len: usize = 0,
+    cap: usize = 0,
+    /// Set when an allocation failed and bytes had to be dropped.
+    failed: bool = false,
+
+    pub fn init(allocator: std.mem.Allocator) ByteBuffer {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *ByteBuffer) void {
+        if (self.cap > 0) self.allocator.free(self.buf[0..self.cap]);
+        self.* = undefined;
+    }
+
+    fn reserve(self: *ByteBuffer, extra: usize) bool {
+        const needed = self.len + extra;
+        if (needed <= self.cap) return true;
+        var new_cap: usize = if (self.cap == 0) 256 else self.cap;
+        while (new_cap < needed) new_cap *= 2;
+        const new_buf = self.allocator.alloc(u8, new_cap) catch {
+            self.failed = true;
+            return false;
+        };
+        if (self.cap > 0) {
+            @memcpy(new_buf[0..self.len], self.buf[0..self.len]);
+            self.allocator.free(self.buf[0..self.cap]);
+        }
+        self.buf = new_buf;
+        self.cap = new_cap;
+        return true;
+    }
+
+    pub fn append(self: *ByteBuffer, bytes: []const u8) void {
+        if (bytes.len == 0) return;
+        if (!self.reserve(bytes.len)) return;
+        @memcpy(self.buf[self.len..][0..bytes.len], bytes);
+        self.len += bytes.len;
+    }
+
+    pub fn appendByte(self: *ByteBuffer, byte: u8) void {
+        if (!self.reserve(1)) return;
+        self.buf[self.len] = byte;
+        self.len += 1;
+    }
+
+    pub fn popLast(self: *ByteBuffer) void {
+        if (self.len > 0) self.len -= 1;
+    }
+
+    pub fn lastByte(self: *const ByteBuffer) ?u8 {
+        if (self.len == 0) return null;
+        return self.buf[self.len - 1];
+    }
+
+    pub fn slice(self: *const ByteBuffer) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
 pub const JsonWriter = struct {
+    /// Fixed output buffer.  Unused when `grow` is set.
     buf: []u8,
     pos: usize = 0,
+    /// When set, the writer appends to this buffer instead of `buf`, so
+    /// the output grows with the content.
+    grow: ?*ByteBuffer = null,
+    /// Set when a write had to be dropped.  A truncated document is not
+    /// valid JSON, so callers check this before sending it.
+    truncated: bool = false,
 
     pub fn init(buf: []u8) JsonWriter {
         return .{ .buf = buf, .pos = 0 };
     }
 
-    pub fn raw(self: *JsonWriter, s: []const u8) void {
-        if (self.pos + s.len > self.buf.len) return;
+    /// A writer whose output grows with the content.
+    pub fn initGrowable(buffer: *ByteBuffer) JsonWriter {
+        return .{ .buf = buffer.buf[0..0], .pos = 0, .grow = buffer };
+    }
+    /// Whether bytes had to be dropped, which means the output is not
+    /// valid JSON.
+    pub fn isTruncated(self: *const JsonWriter) bool {
+        return self.truncated;
+    }
+
+    fn append(self: *JsonWriter, s: []const u8) void {
+        if (self.grow) |buffer| {
+            buffer.append(s);
+            if (buffer.failed) self.truncated = true;
+            return;
+        }
+        if (self.pos + s.len > self.buf.len) {
+            self.truncated = true;
+            return;
+        }
         @memcpy(self.buf[self.pos..][0..s.len], s);
         self.pos += s.len;
+    }
+
+    fn appendByte(self: *JsonWriter, c: u8) void {
+        if (self.grow) |buffer| {
+            buffer.appendByte(c);
+            if (buffer.failed) self.truncated = true;
+            return;
+        }
+        if (self.pos < self.buf.len) {
+            self.buf[self.pos] = c;
+            self.pos += 1;
+        } else {
+            self.truncated = true;
+        }
+    }
+
+    pub fn raw(self: *JsonWriter, s: []const u8) void {
+        self.append(s);
     }
 
     pub fn beginObject(self: *JsonWriter) void {
@@ -23,7 +134,7 @@ pub const JsonWriter = struct {
     }
     pub fn endObject(self: *JsonWriter) void {
         // overwrite trailing comma if present
-        if (self.pos > 0 and self.buf[self.pos - 1] == ',') self.pos -= 1;
+        if (self.lastByte() == ',') self.popLast();
         self.raw("}");
     }
 
@@ -31,8 +142,22 @@ pub const JsonWriter = struct {
         self.raw("[");
     }
     pub fn endArray(self: *JsonWriter) void {
-        if (self.pos > 0 and self.buf[self.pos - 1] == ',') self.pos -= 1;
+        if (self.lastByte() == ',') self.popLast();
         self.raw("]");
+    }
+
+    fn lastByte(self: *const JsonWriter) ?u8 {
+        if (self.grow) |buffer| return buffer.lastByte();
+        if (self.pos == 0) return null;
+        return self.buf[self.pos - 1];
+    }
+
+    fn popLast(self: *JsonWriter) void {
+        if (self.grow) |buffer| {
+            buffer.popLast();
+            return;
+        }
+        if (self.pos > 0) self.pos -= 1;
     }
 
     pub fn key(self: *JsonWriter, name: []const u8) void {
@@ -78,12 +203,7 @@ pub const JsonWriter = struct {
                 '\n' => self.raw("\\n"),
                 '\r' => self.raw("\\r"),
                 '\t' => self.raw("\\t"),
-                else => {
-                    if (self.pos < self.buf.len) {
-                        self.buf[self.pos] = c;
-                        self.pos += 1;
-                    }
-                },
+                else => self.appendByte(c),
             }
         }
         self.raw("\"");
@@ -109,6 +229,7 @@ pub const JsonWriter = struct {
     }
 
     pub fn slice(self: *const JsonWriter) []const u8 {
+        if (self.grow) |buffer| return buffer.slice();
         return self.buf[0..self.pos];
     }
 };
@@ -215,6 +336,95 @@ test "JsonWriter handles buffer overflow gracefully" {
     // buffer is full; further writes are ignored (no panic, no corruption)
     w.writeString("this-is-way-too-long-for-the-buffer");
     try std.testing.expectEqualStrings("\"hello\"", w.slice());
+}
+
+test "JsonWriter reports truncation instead of dropping bytes silently" {
+    var buf: [16]u8 = undefined;
+    var w = JsonWriter.init(&buf);
+    w.raw("0123456789abcdef"); // exactly fits
+    try std.testing.expect(!w.isTruncated());
+    w.raw("g"); // one byte too many
+    try std.testing.expect(w.isTruncated());
+}
+
+test "ByteBuffer grows with the content" {
+    var buffer = ByteBuffer.init(std.testing.allocator);
+    defer buffer.deinit();
+
+    buffer.append("hello");
+    buffer.appendByte('!');
+    try std.testing.expectEqualStrings("hello!", buffer.slice());
+
+    buffer.popLast();
+    try std.testing.expectEqualStrings("hello", buffer.slice());
+    try std.testing.expectEqual(@as(?u8, 'o'), buffer.lastByte());
+}
+
+test "a tool list larger than the old fixed buffer stays complete and parseable" {
+    // tools/list used to be written into a 64 KB buffer, and the writer
+    // dropped whatever did not fit — the client then received truncated,
+    // invalid JSON instead of an error.  The response now grows with the
+    // content, so a tool list of any size comes out whole.
+    var buffer = ByteBuffer.init(std.testing.allocator);
+    defer buffer.deinit();
+
+    var w = JsonWriter.initGrowable(&buffer);
+    w.beginObject();
+    w.key("tools");
+    w.beginArray();
+    var i: usize = 0;
+    while (i < 400) : (i += 1) {
+        w.beginObject();
+        w.fieldStr("name", "ToolWithALongEnoughNameToFillTheOldBuffer");
+        w.fieldStr("description", "A description long enough to push the tool list past the size of the buffer that used to hold it, so the response has to grow with the content.");
+        w.key("inputSchema");
+        w.raw("{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\"}}}");
+        w.raw(",");
+        w.endObject();
+        w.raw(",");
+    }
+    w.endArray();
+    w.endObject();
+
+    try std.testing.expect(!w.isTruncated());
+    try std.testing.expect(buffer.slice().len > 65536);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buffer.slice(), .{});
+    defer parsed.deinit();
+
+    const tools = parsed.value.object.get("tools").?.array;
+    try std.testing.expectEqual(@as(usize, 400), tools.items.len);
+    for (tools.items) |item| {
+        try std.testing.expect(item.object.get("name") != null);
+        try std.testing.expect(item.object.get("description") != null);
+        try std.testing.expect(item.object.get("inputSchema") != null);
+    }
+}
+
+test "a growable writer produces the same document as a fixed one" {
+    var fixed_buf: [4096]u8 = undefined;
+    var w_fixed = JsonWriter.init(&fixed_buf);
+    var grow_buf = ByteBuffer.init(std.testing.allocator);
+    defer grow_buf.deinit();
+    var w_grow = JsonWriter.initGrowable(&grow_buf);
+
+    w_fixed.beginObject();
+    w_grow.beginObject();
+    w_fixed.fieldStr("name", "alice");
+    w_grow.fieldStr("name", "alice");
+    w_fixed.fieldInt("age", 30);
+    w_grow.fieldInt("age", 30);
+    w_fixed.beginArray();
+    w_grow.beginArray();
+    w_fixed.writeString("x\"y");
+    w_grow.writeString("x\"y");
+    w_fixed.endArray();
+    w_grow.endArray();
+    w_fixed.endObject();
+    w_grow.endObject();
+
+    try std.testing.expectEqualStrings(w_fixed.slice(), w_grow.slice());
+    try std.testing.expect(!w_grow.isTruncated());
 }
 
 test "JsonWriter strips trailing comma on endObject" {
