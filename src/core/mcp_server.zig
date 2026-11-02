@@ -56,6 +56,9 @@ fn setRunning(value: bool) void {
 }
 
 var server_port: u16 = 9094;
+/// The port the server actually bound.  It differs from the configured
+/// port when that one was already taken.
+var bound_port: u16 = 0;
 // "127.0.0.1" followed by zero padding, so the default bind address is
 // already correct before setConfig() runs.
 const ip_default_padding: [55]u8 = @splat(0);
@@ -102,6 +105,13 @@ fn currentPort() u16 {
     state_lock.lock();
     defer state_lock.unlock();
     return server_port;
+}
+
+/// The port the server actually bound, or 0 when it is not serving.
+fn currentBoundPort() u16 {
+    state_lock.lock();
+    defer state_lock.unlock();
+    return bound_port;
 }
 
 /// Check a bearer token against the configured one.
@@ -228,8 +238,11 @@ fn pendingDrain(w: *JsonWriter) void {
 //
 // The client table is written by the HTTP worker threads and read by the
 // debugger callback thread that pushes notifications.
-const MAX_SSE_CLIENTS = 8;
-var sse_clients: [MAX_SSE_CLIENTS]SOCKET = @splat(INVALID_SOCKET);
+/// How many ports the server tries before it gives up: the configured
+/// one plus the next MAX_PORT_ATTEMPTS - 1.
+const MAX_PORT_ATTEMPTS = 32;
+
+const MAX_SSE_CLIENTS = 8;var sse_clients: [MAX_SSE_CLIENTS]SOCKET = @splat(INVALID_SOCKET);
 var sse_session_ids: [MAX_SSE_CLIENTS][32]u8 = undefined;
 var sse_session_lens: [MAX_SSE_CLIENTS]usize = @splat(0);
 var sse_next_id: u32 = 1;
@@ -365,6 +378,7 @@ fn logListening() void {
     var ip_buf: [64]u8 = undefined;
     var port: u16 = 0;
     const ip_len = bindTarget(&ip_buf, &port);
+    const listen_port = currentBoundPort();
     const prefix = "[x64dbg-MCP Server] MCP (Streamable) listening on http://";
     @memcpy(buf[0..prefix.len], prefix);
     var pos: usize = prefix.len;
@@ -372,9 +386,16 @@ fn logListening() void {
     pos += ip_len;
     buf[pos] = ':';
     pos += 1;
-    pos += fmtPort(port, buf[pos..]);
+    pos += fmtPort(if (listen_port != 0) listen_port else port, buf[pos..]);
     buf[pos] = '/';
     pos += 1;
+    if (listen_port != 0 and listen_port != port) {
+        // The configured port was taken, so the server walked up.
+        var note_buf: [96]u8 = undefined;
+        const note = std.fmt.bufPrint(&note_buf, " (configured port {d} was in use)", .{port}) catch "";
+        @memcpy(buf[pos .. pos + note.len], note);
+        pos += note.len;
+    }
     buf[pos] = 0;
     bridge.logPuts(@ptrCast(&buf));
 }
@@ -452,6 +473,7 @@ pub fn stop() void {
         var ip_buf: [64]u8 = undefined;
         var port: u16 = 0;
         const ip_len = bindTarget(&ip_buf, &port);
+        const listen_port = currentBoundPort();
         const prefix = "[x64dbg-MCP Server] MCP server stopped (was on ";
         @memcpy(buf[0..prefix.len], prefix);
         var pos: usize = prefix.len;
@@ -459,7 +481,7 @@ pub fn stop() void {
         pos += ip_len;
         buf[pos] = ':';
         pos += 1;
-        pos += fmtPort(port, buf[pos..]);
+        pos += fmtPort(if (listen_port != 0) listen_port else port, buf[pos..]);
         buf[pos] = ')';
         pos += 1;
         buf[pos] = 0;
@@ -511,6 +533,7 @@ fn serverLoop() void {
         state_lock.lock();
         const still_ours = listen_sock == sock;
         listen_sock = INVALID_SOCKET;
+        bound_port = 0;
         state_lock.unlock();
         if (still_ours) _ = ws2.closesocket(sock);
         _ = ws2.WSACleanup();
@@ -522,18 +545,35 @@ fn serverLoop() void {
     var ip_buf: [64]u8 = undefined;
     var port: u16 = 0;
     const ip_len = bindTarget(&ip_buf, &port);
+    const ip = parseIpAddr(ip_buf[0..ip_len]);
 
-    var addr: ws2.SOCKADDR_IN = .{
-        .family = ws2.AF_INET,
-        .port = ws2.htons(port),
-        .addr = parseIpAddr(ip_buf[0..ip_len]),
-    };
-
-    if (ws2.bind(sock, &addr, @sizeOf(ws2.SOCKADDR_IN)) != 0) {
+    // Walk up to the next free port when the configured one is taken.
+    // A second x64dbg instance must not silently stop serving: the
+    // plugin binds 9094 by default, and the first instance already has
+    // it.
+    var bound: u16 = 0;
+    var attempt: u16 = 0;
+    while (attempt < MAX_PORT_ATTEMPTS) : (attempt += 1) {
+        const candidate = port +% attempt;
+        if (candidate == 0) break;
+        var addr: ws2.SOCKADDR_IN = .{
+            .family = ws2.AF_INET,
+            .port = ws2.htons(candidate),
+            .addr = ip,
+        };
+        if (ws2.bind(sock, &addr, @sizeOf(ws2.SOCKADDR_IN)) == 0) {
+            bound = candidate;
+            break;
+        }
+    }
+    if (bound == 0) {
         setRunning(false);
-        bridge.logPuts("[x64dbg-MCP Server] bind() failed.\x00");
+        bridge.logPuts("[x64dbg-MCP Server] bind() failed on every port in the range.\x00");
         return;
     }
+    state_lock.lock();
+    bound_port = bound;
+    state_lock.unlock();
 
     if (ws2.listen(sock, 10) != 0) {
         setRunning(false);
