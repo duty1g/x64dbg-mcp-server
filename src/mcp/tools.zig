@@ -22,16 +22,35 @@ pub const ToolResult = struct {
 pub const ToolDef = struct {
     name: []const u8,
     description: []const u8,
+    /// The group the tool belongs to.  ListCommandsByCategory lists the
+    /// tools grouped by it.
+    category: []const u8 = "General",
     debug_only: bool,
     read_only: bool,
     handler: *const fn (params: ?std.json.Value, out: []u8) ToolResult,
     schema_fn: *const fn (w: *JsonWriter) void,
 };
 
+/// The categories the tools are grouped in, in the order they are
+/// listed.
+pub const categories = [_][]const u8{
+    "State & Control",
+    "Stepping",
+    "Breakpoints",
+    "Disassembly & Code",
+    "Registers & Stack",
+    "Memory",
+    "Modules & Symbols",
+    "Analysis",
+    "Bookmarks & Comments",
+    "Threads",
+};
+
 pub const tools = [_]ToolDef{
     // ── Always available ────────────────────────────────────────
     .{
         .name = "GetDebugState",
+        .category = "State & Control",
         .description = "Returns the current debugger state: whether a binary is loaded, whether it is running or paused, the PID, current instruction pointer, and current module. Always available. Takes no arguments.",
         .debug_only = false,
         .read_only = true,
@@ -40,6 +59,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "LoadBinary",
+        .category = "State & Control",
         .description = "Loads an executable into the debugger for a new debugging session. Equivalent to File > Open in the GUI. If a session is already active it is terminated first. The debuggee pauses at the system breakpoint.",
         .debug_only = false,
         .read_only = false,
@@ -48,6 +68,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "ExecuteDebuggerCommand",
+        .category = "State & Control",
         .description = "Executes a native x64dbg command string (like 'erun', 'analr', 'graph'). This is for x64dbg-internal commands ONLY — do NOT pass MCP tool names here. MCP tools (WaitForEvent, GetDebugState, Disassemble, etc.) must be called directly as tools.",
         .debug_only = false,
         .read_only = false,
@@ -56,6 +77,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "ListCommandsByCategory",
+        .category = "State & Control",
         .description = "Lists the available MCP tools, optionally filtered to a single category.",
         .debug_only = false,
         .read_only = true,
@@ -64,6 +86,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "SearchForStrings",
+        .category = "State & Control",
         .description = "Searches process memory for a specific text string and returns the addresses where it occurs.",
         .debug_only = false,
         .read_only = true,
@@ -72,6 +95,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "GetEventLog",
+        .category = "State & Control",
         .description = "Returns the last N debugger events (exceptions, breakpoints, DLL loads, thread events, etc.). Keeps the last 64 events in a ring buffer. Use this to see what happened in x64dbg.",
         .debug_only = false,
         .read_only = true,
@@ -80,6 +104,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "ClearEventLog",
+        .category = "State & Control",
         .description = "Clears the event log ring buffer.",
         .debug_only = false,
         .read_only = false,
@@ -88,6 +113,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "EvalExpression",
+        .category = "State & Control",
         .description = "Evaluates an x64dbg expression (address, register, arithmetic, symbol) and returns the result in hex and decimal.",
         .debug_only = false,
         .read_only = true,
@@ -96,6 +122,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "AttachProcess",
+        .category = "State & Control",
         .description = "Attaches the debugger to a running process by PID.",
         .debug_only = false,
         .read_only = false,
@@ -104,6 +131,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "Echo",
+        .category = "State & Control",
         .description = "Echoes the input back to the client.",
         .debug_only = false,
         .read_only = true,
@@ -112,6 +140,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "WaitForEvent",
+        .category = "State & Control",
         .description = "Blocks until a debugger event fires (breakpoint hit, paused, resumed, exception, session start/stop) or timeout. Returns all events that occurred. Use this to monitor debugger state changes in real-time over HTTP — call it after 'run' or while waiting for the user to interact with the debugger.",
         .debug_only = false,
         .read_only = true,
@@ -122,6 +151,7 @@ pub const tools = [_]ToolDef{
     // ── Debug-only ──────────────────────────────────────────────
     .{
         .name = "GetCurrentAddress",
+        .category = "Disassembly & Code",
         .description = "Returns the current instruction pointer (EIP/RIP), the module it belongs to, and its label/comment. Takes no arguments.",
         .debug_only = true,
         .read_only = true,
@@ -130,6 +160,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "ReadMemory",
+        .category = "Memory",
         .description = "Reads raw bytes from the target process memory and returns a hex dump with ASCII. Example: ReadMemory address=0x7FF600001000, size=128",
         .debug_only = true,
         .read_only = true,
@@ -138,6 +169,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "WaitForPause",
+        .category = "State & Control",
         .description = "Blocks until the debuggee stops running (hits a breakpoint, exception, or exits). Returns the reason for the pause and the current address. Use after 'run' to wait for the target to break.",
         .debug_only = true,
         .read_only = true,
@@ -146,6 +178,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "run",
+        .category = "State & Control",
         .description = "Resumes execution and waits for the target to pause (breakpoint, exception, or exit). Blocks until a pause event occurs or timeout. Use timeoutMs to control how long to wait (default 120s). Always returns the reason for the pause and current state.",
         .debug_only = true,
         .read_only = false,
@@ -154,6 +187,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "StepInto",
+        .category = "Stepping",
         .description = "Executes a single instruction, stepping INTO any call encountered (F7). Takes no arguments.",
         .debug_only = true,
         .read_only = false,
@@ -162,6 +196,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "StepOver",
+        .category = "Stepping",
         .description = "Executes a single instruction, stepping OVER any call/subroutine entirely (F8). Takes no arguments.",
         .debug_only = true,
         .read_only = false,
@@ -170,6 +205,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "StepOut",
+        .category = "Stepping",
         .description = "Runs until the current function returns to its caller (Ctrl+F9). Takes no arguments.",
         .debug_only = true,
         .read_only = false,
@@ -178,6 +214,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "PauseDebug",
+        .category = "State & Control",
         .description = "Pauses (suspends) the running debuggee, equivalent to Debug > Pause (F12). Takes no arguments.",
         .debug_only = true,
         .read_only = false,
@@ -186,6 +223,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "StopDebug",
+        .category = "State & Control",
         .description = "Terminates the current debugging session and closes the debuggee process. Takes no arguments.",
         .debug_only = true,
         .read_only = false,
@@ -194,6 +232,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "RestartDebug",
+        .category = "State & Control",
         .description = "Restarts the current debugging session from the beginning. Takes no arguments.",
         .debug_only = true,
         .read_only = false,
@@ -202,6 +241,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "SetBreakpoint",
+        .category = "Breakpoints",
         .description = "Sets a software execution breakpoint (INT3) at an address or API symbol.",
         .debug_only = true,
         .read_only = false,
@@ -210,6 +250,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "DeleteBreakpoint",
+        .category = "Breakpoints",
         .description = "Removes a breakpoint at an address or API symbol.",
         .debug_only = true,
         .read_only = false,
@@ -218,6 +259,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "GetAllRegisters",
+        .category = "Registers & Stack",
         .description = "Returns the current values of all general-purpose registers. Takes no arguments.",
         .debug_only = true,
         .read_only = true,
@@ -226,6 +268,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "GetCallStack",
+        .category = "Registers & Stack",
         .description = "Returns the current thread's call stack. Takes no arguments.",
         .debug_only = true,
         .read_only = true,
@@ -234,6 +277,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "WriteMemToAddress",
+        .category = "Memory",
         .description = "Patches memory by writing raw hex bytes to an address. WARNING: this modifies the live process. Example: WriteMemToAddress address=0x12345678, byteString=0F FF 90",
         .debug_only = true,
         .read_only = false,
@@ -242,6 +286,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "CommentOrLabelAtAddress",
+        .category = "Bookmarks & Comments",
         .description = "Adds a comment or a label at a specific address in the disassembly.",
         .debug_only = true,
         .read_only = false,
@@ -250,6 +295,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "Disassemble",
+        .category = "Disassembly & Code",
         .description = "Disassembles instructions at an address. Returns instruction mnemonics with addresses. Default: 10 instructions from current IP.",
         .debug_only = true,
         .read_only = true,
@@ -258,6 +304,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "ListModules",
+        .category = "Modules & Symbols",
         .description = "Lists all loaded modules (DLLs/EXE) with base addresses and sizes.",
         .debug_only = true,
         .read_only = true,
@@ -266,6 +313,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "ListBreakpoints",
+        .category = "Breakpoints",
         .description = "Lists all active breakpoints (software, hardware, and memory).",
         .debug_only = true,
         .read_only = true,
@@ -274,6 +322,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "GetMemoryMap",
+        .category = "Memory",
         .description = "Returns the memory map showing all memory regions with base address, size, protection, and module info.",
         .debug_only = true,
         .read_only = true,
@@ -282,6 +331,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "SetRegister",
+        .category = "Registers & Stack",
         .description = "Sets the value of a CPU register.",
         .debug_only = true,
         .read_only = false,
@@ -290,6 +340,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "GetThreads",
+        .category = "Threads",
         .description = "Lists all threads in the debugged process with IDs, instruction pointers, and names.",
         .debug_only = true,
         .read_only = true,
@@ -298,6 +349,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "SwitchThread",
+        .category = "Threads",
         .description = "Switches the debugger's active thread context to a different thread.",
         .debug_only = true,
         .read_only = false,
@@ -306,6 +358,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "Assemble",
+        .category = "Disassembly & Code",
         .description = "Assembles an instruction at a specific address, replacing existing bytes.",
         .debug_only = true,
         .read_only = false,
@@ -314,6 +367,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "GetImports",
+        .category = "Modules & Symbols",
         .description = "Shows the import table of a loaded module.",
         .debug_only = true,
         .read_only = true,
@@ -322,6 +376,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "GetExports",
+        .category = "Modules & Symbols",
         .description = "Shows the export table of a loaded module.",
         .debug_only = true,
         .read_only = true,
@@ -330,6 +385,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "SetHardwareBreakpoint",
+        .category = "Breakpoints",
         .description = "Sets a hardware breakpoint using debug registers (DR0-DR3). Supports read, write, and execute types.",
         .debug_only = true,
         .read_only = false,
@@ -338,6 +394,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "SetMemoryBreakpoint",
+        .category = "Breakpoints",
         .description = "Sets a memory breakpoint at an address. Triggers when memory is accessed (read/write/execute). Uses guard pages — slower than hardware breakpoints but no DR register limit.",
         .debug_only = true,
         .read_only = false,
@@ -346,6 +403,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "GetPatches",
+        .category = "Memory",
         .description = "Lists all memory patches applied to the debugged process.",
         .debug_only = true,
         .read_only = true,
@@ -355,6 +413,7 @@ pub const tools = [_]ToolDef{
     // ── New tools ──────────────────────────────────────────────────
     .{
         .name = "FindPattern",
+        .category = "Memory",
         .description = "Scans module memory for a byte pattern with ?? wildcards. Returns matching addresses. Example: FindPattern pattern='E8 ?? ?? ?? ?? 85 C0 74'",
         .debug_only = true,
         .read_only = true,
@@ -363,6 +422,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "GetStrings",
+        .category = "Modules & Symbols",
         .description = "Scans a module's memory for ASCII strings and returns them with their addresses.",
         .debug_only = true,
         .read_only = true,
@@ -371,6 +431,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "GetReferences",
+        .category = "Disassembly & Code",
         .description = "Finds code references (CALL/JMP) to a target address within a module.",
         .debug_only = true,
         .read_only = true,
@@ -379,6 +440,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "GetFunctions",
+        .category = "Disassembly & Code",
         .description = "Lists analyzed functions in a module with start addresses, sizes, and labels. Requires prior analysis (Ctrl+A in x64dbg).",
         .debug_only = true,
         .read_only = true,
@@ -387,6 +449,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "RunToAddress",
+        .category = "Stepping",
         .description = "Sets a temporary breakpoint at the target address, resumes execution, and waits for the debuggee to hit it.",
         .debug_only = true,
         .read_only = false,
@@ -395,6 +458,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "TraceInto",
+        .category = "Stepping",
         .description = "Single-steps N instructions recording the address and disassembly of each. Max 100.",
         .debug_only = true,
         .read_only = false,
@@ -403,6 +467,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "SetConditionalBreakpoint",
+        .category = "Breakpoints",
         .description = "Sets a breakpoint with a condition expression and optional log text.",
         .debug_only = true,
         .read_only = false,
@@ -411,6 +476,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "FollowPointer",
+        .category = "Registers & Stack",
         .description = "Dereferences a pointer chain N levels deep, showing each level's address and value with module info.",
         .debug_only = true,
         .read_only = true,
@@ -419,6 +485,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "WatchExpressions",
+        .category = "Registers & Stack",
         .description = "Evaluates multiple x64dbg expressions at once and returns all results. Pass comma-separated expressions.",
         .debug_only = true,
         .read_only = true,
@@ -427,6 +494,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "GetSEHChain",
+        .category = "Analysis",
         .description = "Walks the Structured Exception Handler chain (x32 only) and shows each handler's address and module.",
         .debug_only = true,
         .read_only = true,
@@ -435,6 +503,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "GetPEB",
+        .category = "Analysis",
         .description = "Reads key fields from the Process Environment Block: image base, being debugged, heaps, NtGlobalFlag, image path, command line.",
         .debug_only = true,
         .read_only = true,
@@ -443,6 +512,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "GetArguments",
+        .category = "Registers & Stack",
         .description = "Reads function arguments from the stack (x32: [ESP+4]...) or registers (x64: RCX,RDX,R8,R9...) at the current position.",
         .debug_only = true,
         .read_only = true,
@@ -451,6 +521,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "DumpMemory",
+        .category = "Memory",
         .description = "Saves a memory region to a file on disk.",
         .debug_only = true,
         .read_only = false,
@@ -459,6 +530,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "AllocateMemory",
+        .category = "Memory",
         .description = "Allocates a block of memory in the target process.",
         .debug_only = true,
         .read_only = false,
@@ -467,6 +539,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "FreeMemory",
+        .category = "Memory",
         .description = "Frees a previously allocated memory block in the target process.",
         .debug_only = true,
         .read_only = false,
@@ -475,6 +548,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "EnableBreakpoint",
+        .category = "Breakpoints",
         .description = "Enables a breakpoint at a given address.",
         .debug_only = true,
         .read_only = false,
@@ -483,6 +557,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "DisableBreakpoint",
+        .category = "Breakpoints",
         .description = "Disables a breakpoint at a given address without deleting it.",
         .debug_only = true,
         .read_only = false,
@@ -491,6 +566,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "ToggleBreakpoint",
+        .category = "Breakpoints",
         .description = "Toggles a breakpoint between enabled and disabled.",
         .debug_only = true,
         .read_only = false,
@@ -499,6 +575,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "DeleteAllBreakpoints",
+        .category = "Breakpoints",
         .description = "Removes all breakpoints (normal, hardware, and memory).",
         .debug_only = true,
         .read_only = false,
@@ -507,6 +584,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "ResetHitCount",
+        .category = "Breakpoints",
         .description = "Resets the hit counter of a breakpoint at the given address to zero.",
         .debug_only = true,
         .read_only = false,
@@ -515,6 +593,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "DisassembleFunction",
+        .category = "Disassembly & Code",
         .description = "Disassembles an entire function by finding its start/end boundaries from the analysis database.",
         .debug_only = true,
         .read_only = true,
@@ -523,6 +602,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "SearchSymbols",
+        .category = "Modules & Symbols",
         .description = "Searches for symbols (labels) matching a pattern in a module.",
         .debug_only = true,
         .read_only = true,
@@ -531,6 +611,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "ListSymbols",
+        .category = "Modules & Symbols",
         .description = "Lists exported symbols of a module.",
         .debug_only = true,
         .read_only = true,
@@ -539,6 +620,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "SuspendThread",
+        .category = "Threads",
         .description = "Suspends a thread by its thread ID.",
         .debug_only = true,
         .read_only = false,
@@ -547,6 +629,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "ResumeThread",
+        .category = "Threads",
         .description = "Resumes a suspended thread by its thread ID.",
         .debug_only = true,
         .read_only = false,
@@ -555,6 +638,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "SetBookmark",
+        .category = "Bookmarks & Comments",
         .description = "Sets a bookmark at the specified address.",
         .debug_only = true,
         .read_only = false,
@@ -563,6 +647,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "DeleteBookmark",
+        .category = "Bookmarks & Comments",
         .description = "Deletes a bookmark at the specified address.",
         .debug_only = true,
         .read_only = false,
@@ -571,6 +656,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "ListBookmarks",
+        .category = "Bookmarks & Comments",
         .description = "Lists all bookmarks with addresses and labels.",
         .debug_only = true,
         .read_only = true,
@@ -579,6 +665,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "DumpModule",
+        .category = "Analysis",
         .description = "Dumps an entire loaded module to a file on disk.",
         .debug_only = true,
         .read_only = false,
@@ -587,6 +674,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "AnalyzeModule",
+        .category = "Analysis",
         .description = "Shows PE structure analysis: sections, entry point, image size, characteristics.",
         .debug_only = true,
         .read_only = true,
@@ -595,6 +683,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "DetectOEP",
+        .category = "Analysis",
         .description = "Attempts to detect the Original Entry Point for packed executables by analyzing section characteristics.",
         .debug_only = true,
         .read_only = true,
@@ -603,6 +692,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "GetDumpableRegions",
+        .category = "Memory",
         .description = "Lists memory regions that can be dumped (committed, readable) for a module or the entire process.",
         .debug_only = true,
         .read_only = true,
@@ -611,6 +701,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "RestorePatches",
+        .category = "Memory",
         .description = "Restores all patched bytes back to their original values.",
         .debug_only = true,
         .read_only = false,
@@ -619,6 +710,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "SetExceptionBreakpoint",
+        .category = "Breakpoints",
         .description = "Controls how an exception code is handled: break into debugger or pass to application. Use this to ignore Delphi (0EEDFADE), C++ (E06D7363), or other framework exceptions during startup, or to break on specific exceptions like ILLEGAL_INSTRUCTION (C000001D).",
         .debug_only = true,
         .read_only = false,
@@ -627,6 +719,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "DeleteExceptionBreakpoint",
+        .category = "Breakpoints",
         .description = "Removes an exception breakpoint, restoring default handling for that exception code.",
         .debug_only = true,
         .read_only = false,
@@ -635,6 +728,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "AnalyzeCode",
+        .category = "Analysis",
         .description = "Runs x64dbg code analysis on a module or address range. This populates the function list, enables GetFunctions/GetReferences/DisassembleFunction. Must be run before those tools return useful results.",
         .debug_only = true,
         .read_only = false,
@@ -643,6 +737,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "TraceOver",
+        .category = "Stepping",
         .description = "Steps N instructions stepping OVER calls (like TraceInto but without diving into subroutines). Records address and disassembly of each step.",
         .debug_only = true,
         .read_only = false,
@@ -651,6 +746,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "SetBreakpointCommand",
+        .category = "Breakpoints",
         .description = "Sets an x64dbg command to execute when a breakpoint at the given address is hit. Use for logging breakpoints (e.g., 'log {x:eax}' to log register values on hit).",
         .debug_only = true,
         .read_only = false,
@@ -659,6 +755,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "SetBreakpointFastResume",
+        .category = "Breakpoints",
         .description = "Makes a breakpoint auto-resume after hit without pausing. Combined with SetBreakpointCommand, creates logging breakpoints that record state at thousands of call sites without stopping.",
         .debug_only = true,
         .read_only = false,
@@ -667,6 +764,7 @@ pub const tools = [_]ToolDef{
     },
     .{
         .name = "SaveDatabase",
+        .category = "Analysis",
         .description = "Saves the x64dbg database (labels, comments, breakpoints, analysis) for the current module. Persists your work across sessions.",
         .debug_only = true,
         .read_only = false,
@@ -690,7 +788,7 @@ fn schemaExecuteDebuggerCommand(w: *JsonWriter) void {
 }
 
 fn schemaListCommandsByCategory(w: *JsonWriter) void {
-    w.raw("{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\",\"description\":\"Optional category filter.\"}},\"required\":[]}");
+    w.raw("{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\",\"description\":\"Optional category to list. One of: State & Control, Stepping, Breakpoints, Disassembly & Code, Registers & Stack, Memory, Modules & Symbols, Analysis, Bookmarks & Comments, Threads. Without it, all tools are listed grouped by category.\"}},\"required\":[]}");
 }
 
 fn schemaSearchForStrings(w: *JsonWriter) void {
@@ -1168,17 +1266,66 @@ fn waitForEvent(params: ?std.json.Value, out: []u8) ToolResult {
 }
 
 // ── ListCommandsByCategory ──────────────────────────────────────────
+fn writeToolLine(w: *JsonWriter, t: *const ToolDef) void {
+    w.raw("- ");
+    w.raw(t.name);
+    if (t.debug_only) w.raw(" [debug-only]");
+    w.raw(": ");
+    w.raw(t.description);
+    w.raw("\n");
+}
+
 fn listCommandsByCategory(params: ?std.json.Value, out: []u8) ToolResult {
-    _ = params;
     var w = JsonWriter.init(out);
+
+    // With a category, only the tools of that category are listed.
+    if (getParamStr(params, "category")) |wanted| {
+        if (wanted.len == 0) {
+            w.raw("Error: category must not be empty. Known categories: ");
+            for (categories, 0..) |c, i| {
+                if (i > 0) w.raw(", ");
+                w.raw(c);
+            }
+            w.raw("\n");
+            return .{ .text = w.slice(), .is_error = true };
+        }
+
+        var known = false;
+        for (categories) |category| {
+            if (!std.ascii.eqlIgnoreCase(category, wanted)) continue;
+            known = true;
+            w.raw(category);
+            w.raw(":\n");
+            for (&tools) |*t| {
+                if (!std.mem.eql(u8, t.category, category)) continue;
+                writeToolLine(&w, t);
+            }
+            w.raw("\n");
+        }
+        if (!known) {
+            w.raw("Unknown category: ");
+            w.raw(wanted);
+            w.raw("\nKnown categories: ");
+            for (categories, 0..) |c, i| {
+                if (i > 0) w.raw(", ");
+                w.raw(c);
+            }
+            w.raw("\n");
+            return .{ .text = w.slice(), .is_error = true };
+        }
+        return .{ .text = w.slice() };
+    }
+
+    // Without one, the tools are listed grouped by category.
     w.raw("Available tools:\n");
-    for (&tools) |*t| {
-        w.raw("- ");
-        w.raw(t.name);
-        if (t.debug_only) w.raw(" [debug-only]");
-        w.raw(": ");
-        w.raw(t.description);
+    for (categories) |category| {
         w.raw("\n");
+        w.raw(category);
+        w.raw(":\n");
+        for (&tools) |*t| {
+            if (!std.mem.eql(u8, t.category, category)) continue;
+            writeToolLine(&w, t);
+        }
     }
     return .{ .text = w.slice() };
 }
@@ -3654,4 +3801,58 @@ fn saveDatabase(_: ?std.json.Value, out: []u8) ToolResult {
     if (!bridge.isDebugging()) return errResult(out, "Error: No active debug session.");
     const ok = bridge.cmdExec("dbsave\x00");
     return fmtResult(out, "{s}", .{if (ok) "Database saved." else "Failed to save database."});
+}
+
+// ── Tests ───────────────────────────────────────────────────────────
+
+test "every tool belongs to a known category" {
+    for (tools) |t| {
+        var known = false;
+        for (categories) |c| {
+            if (std.mem.eql(u8, t.category, c)) {
+                known = true;
+                break;
+            }
+        }
+        try std.testing.expect(known);
+    }
+}
+
+test "ListCommandsByCategory groups the tools by category" {
+    var buf: [65536]u8 = undefined;
+    const r = listCommandsByCategory(null, &buf);
+    try std.testing.expect(!r.is_error);
+    for (categories) |c| {
+        try std.testing.expect(std.mem.indexOf(u8, r.text, c) != null);
+    }
+    for (tools) |t| {
+        try std.testing.expect(std.mem.indexOf(u8, r.text, t.name) != null);
+    }
+}
+
+test "ListCommandsByCategory filters by category" {
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"category":"Memory"}
+    , .{});
+    defer parsed.deinit();
+
+    var buf: [65536]u8 = undefined;
+    const r = listCommandsByCategory(parsed.value, &buf);
+    try std.testing.expect(!r.is_error);
+    try std.testing.expect(std.mem.indexOf(u8, r.text, "Memory:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.text, "ReadMemory") != null);
+    // A tool of another category is not listed.
+    try std.testing.expect(std.mem.indexOf(u8, r.text, "SuspendThread") == null);
+}
+
+test "ListCommandsByCategory reports an unknown category" {
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"category":"Nonexistent"}
+    , .{});
+    defer parsed.deinit();
+
+    var buf: [65536]u8 = undefined;
+    const r = listCommandsByCategory(parsed.value, &buf);
+    try std.testing.expect(r.is_error);
+    try std.testing.expect(std.mem.indexOf(u8, r.text, "Unknown category") != null);
 }
