@@ -957,7 +957,7 @@ fn buildStateSnippet(buf: *[256]u8) []const u8 {
     const mod_name = if (has_mod) bridge.cstrSlice(&mod_buf) else "unknown";
 
     var dis_buf: [256]u8 = undefined;
-    const has_dis = if (bridge.GuiGetDisassembly) |f| f(cip, &dis_buf) != 0 else false;
+    const has_dis = bridge.disasmTextAt(cip, &dis_buf);
     const dis_text = if (has_dis) bridge.cstrSlice(&dis_buf) else "";
 
     return std.fmt.bufPrint(buf, "[state] PAUSED at 0x{X} ({s}) | {s}", .{ cip, mod_name, dis_text }) catch buf[0..0];

@@ -168,17 +168,17 @@ pub const DISASM_MEMORY_INFO = extern struct {
     mnemonic: [MAX_MNEMONIC_SIZE]u8,
 };
 
+// Layout of x64dbg's BASIC_INSTRUCTION_INFO (src/bridge/bridgemain.h).
+// The field order below is the one x64dbg has used since 2020.
 pub const BASIC_INSTRUCTION_INFO = extern struct {
     @"type": u32,
     value: VALUE_INFO,
     memory: DISASM_MEMORY_INFO,
-    size: u32,
-    instruction: [MAX_MNEMONIC_SIZE * 4]u8,
     addr: duint,
     branch: bool,
     call: bool,
-    argcount: c_int,
-    argvalue: [4]duint,
+    size: c_int,
+    instruction: [MAX_MNEMONIC_SIZE * 4]u8,
 };
 
 // ── Memory map structs ─────────────────────────────────────────────
@@ -304,7 +304,7 @@ const EntrySetIconFn = *const fn (pluginHandle: c_int, hEntry: c_int, icon: *con
 pub var _plugin_menuentryseticon: ?EntrySetIconFn = null;
 
 // Extended bridge functions (optional)
-const DbgDisasmFastAtFn = *const fn (addr: duint, info: *BASIC_INSTRUCTION_INFO) callconv(.c) BOOL;
+const DbgDisasmFastAtFn = *const fn (addr: duint, info: *BASIC_INSTRUCTION_INFO) callconv(.c) void;
 pub var DbgDisasmFastAt: ?DbgDisasmFastAtFn = null;
 const DbgGetBpListFn = *const fn (bptype: c_int, list: *BPMAP) callconv(.c) BOOL;
 pub var DbgGetBpList: ?DbgGetBpListFn = null;
@@ -320,8 +320,9 @@ const DbgFunctionGetFn = *const fn (addr: duint, start: *duint, end: *duint) cal
 pub var DbgFunctionGet: ?DbgFunctionGetFn = null;
 
 // GUI functions (from x64bridge.dll)
-const GuiGetDisassemblyFn = *const fn (addr: duint, text: [*]u8) callconv(.c) BOOL;
-pub var GuiGetDisassembly: ?GuiGetDisassemblyFn = null;
+// The plugin deliberately does not use any Gui* function: those send a
+// message to x64dbg's GUI thread, which is the wrong thread for the
+// HTTP worker threads and which blocks for as long as the GUI is busy.
 
 fn resolve(comptime T: type, module: HMODULE, name: [*:0]const u8) T {
     const raw = GetProcAddress(module, name);
@@ -382,7 +383,6 @@ pub fn init() !void {
     DbgMemMap = resolveOptional(DbgMemMapFn, m, "DbgMemMap");
     DbgGetThreadList = resolveOptional(DbgGetThreadListFn, m, "DbgGetThreadList");
     BridgeFree = resolveOptional(BridgeFreeFn, m, "BridgeFree");
-    GuiGetDisassembly = resolveOptional(GuiGetDisassemblyFn, m, "GuiGetDisassembly");
     DbgFunctionGet = resolveOptional(DbgFunctionGetFn, m, "DbgFunctionGet");
 
     // Plugin functions (from x64dbg.dll / x32dbg.dll)
@@ -457,4 +457,24 @@ pub fn cstrSlice(buf: []const u8) []const u8 {
         if (c == 0) return buf[0..i];
     }
     return buf;
+}
+
+/// Disassemble the instruction at `addr` and copy its text into `buf`.
+///
+/// DbgDisasmFastAt is the debugger-side bridge function: x64dbg
+/// marshals the request onto its debugger thread, which owns the
+/// instruction bytes and the debugger state.  The GUI variant
+/// (GuiGetDisassembly) sends a message to the GUI thread instead, which
+/// is the wrong thread for a request that arrives on an HTTP worker
+/// thread and which blocks for as long as the GUI is busy.
+pub fn disasmTextAt(addr: duint, buf: []u8) bool {
+    const fn_ptr = DbgDisasmFastAt orelse return false;
+    var info: BASIC_INSTRUCTION_INFO = std.mem.zeroes(BASIC_INSTRUCTION_INFO);
+    fn_ptr(addr, &info);
+    const text = cstrSlice(info.instruction[0..]);
+    if (text.len == 0) return false;
+    const n = @min(text.len, buf.len);
+    @memcpy(buf[0..n], text[0..n]);
+    if (n < buf.len) buf[n] = 0;
+    return true;
 }

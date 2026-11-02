@@ -1360,9 +1360,8 @@ fn appendStepContext(out: []u8, pos: *usize) void {
         pos.* += lbl_line.len;
     }
 
-    const gui_fn = bridge.GuiGetDisassembly orelse return;
     var text_buf: [256]u8 = std.mem.zeroes([256]u8);
-    if (gui_fn(cip, &text_buf) != 0) {
+    if (bridge.disasmTextAt(cip, &text_buf)) {
         const instr = bridge.cstrSlice(&text_buf);
         if (instr.len > 0) {
             const dis_line = std.fmt.bufPrint(out[pos.*..], "\nInstruction: {s}", .{instr}) catch return;
@@ -1375,7 +1374,7 @@ fn appendStepContext(out: []u8, pos: *usize) void {
     const next_addr = bridge.valFromString(@ptrCast(next_expr.ptr));
     if (next_addr != 0 and next_addr != cip) {
         var text_buf2: [256]u8 = std.mem.zeroes([256]u8);
-        if (gui_fn(next_addr, &text_buf2) != 0) {
+        if (bridge.disasmTextAt(next_addr, &text_buf2)) {
             const next_instr = bridge.cstrSlice(&text_buf2);
             if (next_instr.len > 0) {
                 const next_line = std.fmt.bufPrint(out[pos.*..], "\nNext: 0x{X}  {s}", .{ next_addr, next_instr }) catch return;
@@ -1684,7 +1683,6 @@ fn disassemble(params: ?std.json.Value, out: []u8) ToolResult {
     if (addr == 0 and !std.mem.eql(u8, addr_str, "0"))
         return fmtErr(out, "Error: Could not resolve '{s}'.", .{addr_str});
 
-    const gui_fn = bridge.GuiGetDisassembly;
     var pos: usize = 0;
     var i: usize = 0;
     while (i < count) : (i += 1) {
@@ -1708,10 +1706,8 @@ fn disassemble(params: ?std.json.Value, out: []u8) ToolResult {
 
         var text_buf: [256]u8 = std.mem.zeroes([256]u8);
         var instr_text: []const u8 = "";
-        if (gui_fn) |f| {
-            if (f(addr, &text_buf) != 0) {
-                instr_text = bridge.cstrSlice(&text_buf);
-            }
+        if (bridge.disasmTextAt(addr, &text_buf)) {
+            instr_text = bridge.cstrSlice(&text_buf);
         }
 
         if (instr_text.len > 0) {
@@ -2584,16 +2580,14 @@ fn traceInto(params: ?std.json.Value, out: []u8) ToolResult {
         count = @intCast(@min(@max(c, 1), 100));
     }
 
-    const gui_fn = bridge.GuiGetDisassembly;
     var pos: usize = 0;
     var i: usize = 0;
     while (i < count) : (i += 1) {
         const cip = bridge.valFromString("cip\x00");
         var text_buf: [256]u8 = std.mem.zeroes([256]u8);
         var instr: []const u8 = "";
-        if (gui_fn) |gd| {
-            if ((@as(u32, @bitCast(gd(cip, &text_buf))) & 0xFF) != 0)
-                instr = bridge.cstrSlice(&text_buf);
+        if (bridge.disasmTextAt(cip, &text_buf)) {
+            instr = bridge.cstrSlice(&text_buf);
         }
         const line = std.fmt.bufPrint(out[pos..], "0x{X}: {s}\n", .{ cip, instr }) catch break;
         pos += line.len;
@@ -3040,7 +3034,6 @@ fn disassembleFunction(params: ?std.json.Value, out: []u8) ToolResult {
         pos += hdr.len;
     }
 
-    const gui_fn = bridge.GuiGetDisassembly;
     var current = func_start;
     var count: usize = 0;
     while (current <= func_end and count < 500) : (count += 1) {
@@ -3051,10 +3044,8 @@ fn disassembleFunction(params: ?std.json.Value, out: []u8) ToolResult {
 
         var text_buf: [256]u8 = std.mem.zeroes([256]u8);
         var instr_text: []const u8 = "";
-        if (gui_fn) |f| {
-            if (f(current, &text_buf) != 0) {
-                instr_text = bridge.cstrSlice(&text_buf);
-            }
+        if (bridge.disasmTextAt(current, &text_buf)) {
+            instr_text = bridge.cstrSlice(&text_buf);
         }
 
         if (instr_text.len > 0) {
@@ -3620,7 +3611,7 @@ fn traceOver(params: ?std.json.Value, out: []u8) ToolResult {
 
         const cip = bridge.valFromString("cip");
         var dis_buf: [256]u8 = undefined;
-        const has_dis = if (bridge.GuiGetDisassembly) |f| f(cip, &dis_buf) != 0 else false;
+        const has_dis = bridge.disasmTextAt(cip, &dis_buf);
         const dis_text = if (has_dis) bridge.cstrSlice(&dis_buf) else "???";
         const line = std.fmt.bufPrint(out[pos..], "0x{X}: {s}\n", .{ cip, dis_text }) catch break;
         pos += line.len;
