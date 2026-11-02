@@ -890,7 +890,11 @@ fn buildInitializeResult(w: *JsonWriter) void {
     w.key("capabilities");
     w.beginObject();
     w.key("tools");
-    w.raw("{\"listChanged\":true},");
+    // The tool set is a static array that is fixed when the plugin is
+    // built, so it never changes while the server runs and the server
+    // never sends notifications/tools/list_changed.  Advertising
+    // listChanged would promise a notification that does not come.
+    w.raw("{\"listChanged\":false},");
     w.endObject();
     w.raw(",");
     w.fieldStr("instructions",
