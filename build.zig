@@ -4,6 +4,11 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // ── x32 plugin (.dp32) ──────────────────────────────────────────
+    //
+    // The plugin is not single-threaded: the MCP server runs on its own
+    // thread and one thread per HTTP connection, concurrently with
+    // x64dbg's debugger callbacks.  The shared state is protected by
+    // SRWLOCK-based locks (src/core/sync.zig).
     const x32_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = b.resolveTargetQuery(.{
@@ -12,7 +17,6 @@ pub fn build(b: *std.Build) void {
             .abi = .gnu,
         }),
         .optimize = optimize,
-        .single_threaded = true,
     });
     x32_mod.linkSystemLibrary("kernel32", .{});
     x32_mod.linkSystemLibrary("ws2_32", .{});
@@ -40,7 +44,6 @@ pub fn build(b: *std.Build) void {
             .abi = .gnu,
         }),
         .optimize = optimize,
-        .single_threaded = true,
     });
     x64_mod.linkSystemLibrary("kernel32", .{});
     x64_mod.linkSystemLibrary("ws2_32", .{});

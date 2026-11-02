@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const bridge = @import("bridge.zig");
+const sync = @import("sync.zig");
 const tools_mod = @import("../mcp/tools.zig");
 const json_mod = @import("../mcp/json.zig");
 const JsonWriter = json_mod.JsonWriter;
@@ -29,10 +30,32 @@ extern "kernel32" fn CloseHandle(hObject: HANDLE) callconv(.winapi) i32;
 extern "kernel32" fn WaitForSingleObject(hHandle: ?*anyopaque, dwMilliseconds: u32) callconv(.winapi) u32;
 
 var server_handle: HANDLE = null;
-pub var server_running: bool = false;
+var running_flag: bool = false;
+var state_lock: sync.Mutex = .{};
 var listen_sock: SOCKET = INVALID_SOCKET;
 
-pub var server_port: u16 = 9094;
+/// Prepare the locks that guard the state shared between x64dbg's
+/// debugger callbacks and the HTTP worker threads.
+pub fn initLocks() void {
+    state_lock.init();
+    pending_lock.init();
+    sse_lock.init();
+}
+
+/// Whether the MCP server is currently serving.
+pub fn isRunning() bool {
+    state_lock.lock();
+    defer state_lock.unlock();
+    return running_flag;
+}
+
+fn setRunning(value: bool) void {
+    state_lock.lock();
+    defer state_lock.unlock();
+    running_flag = value;
+}
+
+var server_port: u16 = 9094;
 // "127.0.0.1" followed by zero padding, so the default bind address is
 // already correct before setConfig() runs.
 const ip_default_padding: [55]u8 = @splat(0);
@@ -41,7 +64,12 @@ var server_ip_len: usize = 9;
 var auth_token: [64]u8 = @splat(0);
 var auth_token_len: usize = 0;
 
+/// The bind address, the port and the auth token are written by the
+/// config dialog on x64dbg's GUI thread and read by the server thread
+/// and the HTTP worker threads, so they are guarded by the state lock.
 pub fn setConfig(ip: []const u8, port: u16, token: []const u8) void {
+    state_lock.lock();
+    defer state_lock.unlock();
     server_port = port;
     if (ip.len > 0 and ip.len < 64) {
         @memcpy(server_ip[0..ip.len], ip);
@@ -57,6 +85,31 @@ pub fn setConfig(ip: []const u8, port: u16, token: []const u8) void {
     } else {
         auth_token_len = 0;
     }
+}
+
+/// Copy the configured bind address and port out of the shared state.
+fn bindTarget(ip_buf: []u8, port: *u16) usize {
+    state_lock.lock();
+    defer state_lock.unlock();
+    const n = @min(server_ip_len, ip_buf.len);
+    @memcpy(ip_buf[0..n], server_ip[0..n]);
+    port.* = server_port;
+    return n;
+}
+
+/// The port the server is listening on.
+fn currentPort() u16 {
+    state_lock.lock();
+    defer state_lock.unlock();
+    return server_port;
+}
+
+/// Check a bearer token against the configured one.
+fn authTokenMatches(bearer: []const u8) bool {
+    state_lock.lock();
+    defer state_lock.unlock();
+    if (auth_token_len == 0 or bearer.len != auth_token_len) return false;
+    return std.mem.eql(u8, bearer, auth_token[0..auth_token_len]);
 }
 
 fn parseIpAddr(ip: []const u8) u32 {
@@ -85,22 +138,53 @@ fn parseIpAddr(ip: []const u8) u32 {
 }
 
 // ── Pending events queue (for HTTP clients that can't receive SSE) ──
+//
+// The queue is filled by x64dbg's debugger callbacks and drained by the
+// HTTP worker threads, so it is guarded by its own lock.
 const MAX_PENDING_EVENTS = 16;
 const MAX_EVENT_LEN = 128;
 var pending_events: [MAX_PENDING_EVENTS][MAX_EVENT_LEN]u8 = undefined;
 var pending_event_lens: [MAX_PENDING_EVENTS]usize = @splat(0);
 var pending_head: usize = 0;
 var pending_count: usize = 0;
+var pending_lock: sync.Mutex = .{};
+
+/// A copy of the pending queue, taken while holding the lock.
+const PendingSnapshot = struct {
+    count: usize = 0,
+    lens: [MAX_PENDING_EVENTS]usize = @splat(0),
+    texts: [MAX_PENDING_EVENTS][MAX_EVENT_LEN]u8 = undefined,
+};
+
+/// Take everything that is queued and empty the queue.
+fn pendingTake() PendingSnapshot {
+    var snap: PendingSnapshot = .{};
+    pending_lock.lock();
+    defer pending_lock.unlock();
+    snap.count = pending_count;
+    var i: usize = 0;
+    while (i < pending_count) : (i += 1) {
+        const slot = (pending_head + i) % MAX_PENDING_EVENTS;
+        snap.lens[i] = pending_event_lens[slot];
+        @memcpy(snap.texts[i][0..snap.lens[i]], pending_events[slot][0..snap.lens[i]]);
+    }
+    pending_head = 0;
+    pending_count = 0;
+    return snap;
+}
 
 pub fn pendingHasEvents() bool {
+    pending_lock.lock();
+    defer pending_lock.unlock();
     return pending_count > 0;
 }
 
 pub fn pendingDrainToBuffer(out: []u8) usize {
+    const snap = pendingTake();
     var pos: usize = 0;
-    while (pending_count > 0) {
-        const slot = pending_head;
-        const event_text = pending_events[slot][0..pending_event_lens[slot]];
+    var i: usize = 0;
+    while (i < snap.count) : (i += 1) {
+        const event_text = snap.texts[i][0..snap.lens[i]];
         if (pos > 0 and pos < out.len) {
             out[pos] = '\n';
             pos += 1;
@@ -109,15 +193,15 @@ pub fn pendingDrainToBuffer(out: []u8) usize {
         if (copy_len == 0) break;
         @memcpy(out[pos .. pos + copy_len], event_text[0..copy_len]);
         pos += copy_len;
-        pending_head = (pending_head + 1) % MAX_PENDING_EVENTS;
-        pending_count -= 1;
     }
     return pos;
 }
 
 fn pendingPush(msg: []const u8) void {
-    const slot = (pending_head + pending_count) % MAX_PENDING_EVENTS;
     const copy_len = @min(msg.len, MAX_EVENT_LEN);
+    pending_lock.lock();
+    defer pending_lock.unlock();
+    const slot = (pending_head + pending_count) % MAX_PENDING_EVENTS;
     @memcpy(pending_events[slot][0..copy_len], msg[0..copy_len]);
     pending_event_lens[slot] = copy_len;
     if (pending_count < MAX_PENDING_EVENTS) {
@@ -128,28 +212,40 @@ fn pendingPush(msg: []const u8) void {
 }
 
 fn pendingDrain(w: *JsonWriter) void {
-    while (pending_count > 0) {
-        const slot = pending_head;
-        const event_text = pending_events[slot][0..pending_event_lens[slot]];
+    const snap = pendingTake();
+    var i: usize = 0;
+    while (i < snap.count) : (i += 1) {
         w.raw(",");
         w.beginObject();
         w.fieldStr("type", "text");
         w.key("text");
-        w.writeString(event_text);
+        w.writeString(snap.texts[i][0..snap.lens[i]]);
         w.endObject();
-        pending_head = (pending_head + 1) % MAX_PENDING_EVENTS;
-        pending_count -= 1;
     }
 }
 
 // ── SSE client tracking ────────────────────────────────────────────
+//
+// The client table is written by the HTTP worker threads and read by the
+// debugger callback thread that pushes notifications.
 const MAX_SSE_CLIENTS = 8;
 var sse_clients: [MAX_SSE_CLIENTS]SOCKET = @splat(INVALID_SOCKET);
 var sse_session_ids: [MAX_SSE_CLIENTS][32]u8 = undefined;
 var sse_session_lens: [MAX_SSE_CLIENTS]usize = @splat(0);
 var sse_next_id: u32 = 1;
+var sse_lock: sync.Mutex = .{};
 
-fn sseAddClient(sock: SOCKET) ?usize {
+/// A slot of the SSE client table.
+const SseSlot = struct {
+    index: usize,
+    session_id: [32]u8 = undefined,
+    session_len: usize = 0,
+};
+
+/// Register an SSE client.  Returns null when no slot is free.
+fn sseAddClient(sock: SOCKET) ?SseSlot {
+    sse_lock.lock();
+    defer sse_lock.unlock();
     for (0..MAX_SSE_CLIENTS) |i| {
         if (sse_clients[i] == INVALID_SOCKET) {
             sse_clients[i] = sock;
@@ -157,28 +253,66 @@ fn sseAddClient(sock: SOCKET) ?usize {
             sse_next_id +%= 1;
             const len = fmtU32(id, &sse_session_ids[i]);
             sse_session_lens[i] = len;
-            return i;
+            var slot: SseSlot = .{ .index = i };
+            @memcpy(slot.session_id[0..len], sse_session_ids[i][0..len]);
+            slot.session_len = len;
+            return slot;
         }
     }
     return null;
 }
 
-fn sseRemoveClient(idx: usize) void {
-    if (idx < MAX_SSE_CLIENTS) {
-        sse_clients[idx] = INVALID_SOCKET;
-        sse_session_lens[idx] = 0;
-    }
+/// Release a slot.  The socket is checked so a late disconnect cannot
+/// clear a slot that has meanwhile been handed to another client.
+fn sseRemoveClient(idx: usize, sock: SOCKET) void {
+    if (idx >= MAX_SSE_CLIENTS) return;
+    sse_lock.lock();
+    defer sse_lock.unlock();
+    if (sse_clients[idx] != sock) return;
+    sse_clients[idx] = INVALID_SOCKET;
+    sse_session_lens[idx] = 0;
 }
 
-fn sseFindBySessionId(session_id: []const u8) ?usize {
+/// Find the socket of the SSE client with the given session id.
+fn sseFindBySessionId(session_id: []const u8) ?SOCKET {
+    sse_lock.lock();
+    defer sse_lock.unlock();
     for (0..MAX_SSE_CLIENTS) |i| {
         if (sse_clients[i] != INVALID_SOCKET and sse_session_lens[i] > 0) {
             if (std.mem.eql(u8, sse_session_ids[i][0..sse_session_lens[i]], session_id)) {
-                return i;
+                return sse_clients[i];
             }
         }
     }
     return null;
+}
+
+/// Copy the sockets of all connected SSE clients, so notifications can
+/// be pushed without holding the lock across a blocking send.
+fn sseSnapshot(socks: *[MAX_SSE_CLIENTS]SOCKET) usize {
+    sse_lock.lock();
+    defer sse_lock.unlock();
+    var n: usize = 0;
+    for (0..MAX_SSE_CLIENTS) |i| {
+        if (sse_clients[i] != INVALID_SOCKET) {
+            socks[n] = sse_clients[i];
+            n += 1;
+        }
+    }
+    return n;
+}
+
+/// Close every SSE client socket and empty the table.
+fn sseCloseAll() void {
+    sse_lock.lock();
+    defer sse_lock.unlock();
+    for (0..MAX_SSE_CLIENTS) |i| {
+        if (sse_clients[i] != INVALID_SOCKET) {
+            _ = ws2.closesocket(sse_clients[i]);
+            sse_clients[i] = INVALID_SOCKET;
+        }
+        sse_session_lens[i] = 0;
+    }
 }
 
 fn sseSendEvent(sock: SOCKET, event: []const u8, data: []const u8) void {
@@ -190,7 +324,7 @@ fn sseSendEvent(sock: SOCKET, event: []const u8, data: []const u8) void {
 }
 
 pub fn notifyEvent(level: []const u8, msg: []const u8) void {
-    if (!server_running) return;
+    if (!isRunning()) return;
 
     // Queue for HTTP clients — plain text with level prefix
     var pend_buf: [MAX_EVENT_LEN]u8 = undefined;
@@ -203,10 +337,10 @@ pub fn notifyEvent(level: []const u8, msg: []const u8) void {
         "{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{{\"level\":\"{s}\",\"data\":\"{s}\"}}}}",
         .{ level, msg },
     ) catch return;
-    for (0..MAX_SSE_CLIENTS) |i| {
-        if (sse_clients[i] != INVALID_SOCKET) {
-            sseSendEvent(sse_clients[i], "message", json);
-        }
+    var socks: [MAX_SSE_CLIENTS]SOCKET = undefined;
+    const count = sseSnapshot(&socks);
+    for (socks[0..count]) |sock| {
+        sseSendEvent(sock, "message", json);
     }
 }
 
@@ -228,14 +362,17 @@ fn fmtU32(val: u32, buf: *[32]u8) usize {
 
 fn logListening() void {
     var buf: [192]u8 = undefined;
+    var ip_buf: [64]u8 = undefined;
+    var port: u16 = 0;
+    const ip_len = bindTarget(&ip_buf, &port);
     const prefix = "[x64dbg-MCP Server] MCP (Streamable) listening on http://";
     @memcpy(buf[0..prefix.len], prefix);
     var pos: usize = prefix.len;
-    @memcpy(buf[pos .. pos + server_ip_len], server_ip[0..server_ip_len]);
-    pos += server_ip_len;
+    @memcpy(buf[pos .. pos + ip_len], ip_buf[0..ip_len]);
+    pos += ip_len;
     buf[pos] = ':';
     pos += 1;
-    pos += fmtPort(server_port, buf[pos..]);
+    pos += fmtPort(port, buf[pos..]);
     buf[pos] = '/';
     pos += 1;
     buf[pos] = 0;
@@ -259,30 +396,33 @@ fn fmtPort(val: u16, buf: []u8) usize {
 }
 
 pub fn start() void {
-    if (server_running) {
+    if (isRunning()) {
         bridge.logPuts("[x64dbg-MCP Server] Server already running.\x00");
         return;
     }
 
-    server_running = true;
+    setRunning(true);
 
     server_handle = CreateThread(null, 0, serverThreadProc, null, 0, null);
     if (server_handle == null) {
-        server_running = false;
+        setRunning(false);
         bridge.logPuts("[x64dbg-MCP Server] Failed to create server thread.\x00");
         return;
     }
 
     {
         var buf: [192]u8 = undefined;
+        var ip_buf: [64]u8 = undefined;
+        var port: u16 = 0;
+        const ip_len = bindTarget(&ip_buf, &port);
         const prefix = "[x64dbg-MCP Server] Starting MCP server on ";
         @memcpy(buf[0..prefix.len], prefix);
         var pos: usize = prefix.len;
-        @memcpy(buf[pos .. pos + server_ip_len], server_ip[0..server_ip_len]);
-        pos += server_ip_len;
+        @memcpy(buf[pos .. pos + ip_len], ip_buf[0..ip_len]);
+        pos += ip_len;
         buf[pos] = ':';
         pos += 1;
-        pos += fmtPort(server_port, buf[pos..]);
+        pos += fmtPort(port, buf[pos..]);
         const suffix = "...";
         @memcpy(buf[pos .. pos + suffix.len], suffix);
         pos += suffix.len;
@@ -292,22 +432,14 @@ pub fn start() void {
 }
 
 pub fn stop() void {
-    if (!server_running) return;
-    server_running = false;
+    if (!isRunning()) return;
+    setRunning(false);
 
     // Close all SSE client sockets to unblock their keepalive loops
-    for (&sse_clients) |*slot| {
-        if (slot.* != INVALID_SOCKET) {
-            _ = ws2.closesocket(slot.*);
-            slot.* = INVALID_SOCKET;
-        }
-    }
+    sseCloseAll();
 
     // Close listen socket to unblock accept()
-    if (listen_sock != INVALID_SOCKET) {
-        _ = ws2.closesocket(listen_sock);
-        listen_sock = INVALID_SOCKET;
-    }
+    closeListenSocket();
 
     // Wait for server thread to exit (up to 5s)
     if (server_handle) |h| {
@@ -317,18 +449,31 @@ pub fn stop() void {
     }
     {
         var buf: [192]u8 = undefined;
+        var ip_buf: [64]u8 = undefined;
+        var port: u16 = 0;
+        const ip_len = bindTarget(&ip_buf, &port);
         const prefix = "[x64dbg-MCP Server] MCP server stopped (was on ";
         @memcpy(buf[0..prefix.len], prefix);
         var pos: usize = prefix.len;
-        @memcpy(buf[pos .. pos + server_ip_len], server_ip[0..server_ip_len]);
-        pos += server_ip_len;
+        @memcpy(buf[pos .. pos + ip_len], ip_buf[0..ip_len]);
+        pos += ip_len;
         buf[pos] = ':';
         pos += 1;
-        pos += fmtPort(server_port, buf[pos..]);
+        pos += fmtPort(port, buf[pos..]);
         buf[pos] = ')';
         pos += 1;
         buf[pos] = 0;
         bridge.logPuts(@ptrCast(&buf));
+    }
+}
+
+/// Close the listening socket, if one is open.  Used to unblock accept().
+fn closeListenSocket() void {
+    state_lock.lock();
+    defer state_lock.unlock();
+    if (listen_sock != INVALID_SOCKET) {
+        _ = ws2.closesocket(listen_sock);
+        listen_sock = INVALID_SOCKET;
     }
 }
 
@@ -346,52 +491,62 @@ fn clientThreadProc(param: ?*anyopaque) callconv(.winapi) u32 {
 fn serverLoop() void {
     var wsa_data: ws2.WSADATA = undefined;
     if (ws2.WSAStartup(0x0202, &wsa_data) != 0) {
-        server_running = false;
+        setRunning(false);
         bridge.logPuts("[x64dbg-MCP Server] WSAStartup failed.\x00");
         return;
     }
 
     const sock = ws2.socket(@intCast(ws2.AF_INET), ws2.SOCK_STREAM, 0);
     if (sock == INVALID_SOCKET) {
-        server_running = false;
+        setRunning(false);
         bridge.logPuts("[x64dbg-MCP Server] socket() failed.\x00");
         _ = ws2.WSACleanup();
         return;
     }
+    state_lock.lock();
     listen_sock = sock;
+    state_lock.unlock();
     defer {
-        _ = ws2.closesocket(sock);
+        // stop() may already have closed the listening socket.
+        state_lock.lock();
+        const still_ours = listen_sock == sock;
         listen_sock = INVALID_SOCKET;
+        state_lock.unlock();
+        if (still_ours) _ = ws2.closesocket(sock);
         _ = ws2.WSACleanup();
     }
 
     const one: i32 = 1;
     _ = ws2.setsockopt(sock, ws2.SOL_SOCKET, ws2.SO_REUSEADDR, @ptrCast(&one), @sizeOf(i32));
 
+    var ip_buf: [64]u8 = undefined;
+    var port: u16 = 0;
+    const ip_len = bindTarget(&ip_buf, &port);
+
     var addr: ws2.SOCKADDR_IN = .{
         .family = ws2.AF_INET,
-        .port = ws2.htons(server_port),
-        .addr = parseIpAddr(server_ip[0..server_ip_len]),
+        .port = ws2.htons(port),
+        .addr = parseIpAddr(ip_buf[0..ip_len]),
     };
 
     if (ws2.bind(sock, &addr, @sizeOf(ws2.SOCKADDR_IN)) != 0) {
-        server_running = false;
+        setRunning(false);
         bridge.logPuts("[x64dbg-MCP Server] bind() failed.\x00");
         return;
     }
 
     if (ws2.listen(sock, 10) != 0) {
-        server_running = false;
+        setRunning(false);
         bridge.logPuts("[x64dbg-MCP Server] listen() failed.\x00");
         return;
     }
 
     logListening();
 
-    while (server_running) {
+    while (isRunning()) {
         const client = ws2.accept(sock, null, null);
         if (client == INVALID_SOCKET) {
-            if (!server_running) break;
+            if (!isRunning()) break;
             continue;
         }
 
@@ -460,7 +615,7 @@ fn handleClient(sock: SOCKET) void {
         if (tok) |t| {
             if (t.len > 7 and std.mem.eql(u8, t[0..7], "Bearer ")) {
                 const bearer = t[7..];
-                if (auth_token_len > 0 and bearer.len == auth_token_len and std.mem.eql(u8, bearer, auth_token[0..auth_token_len])) {
+                if (authTokenMatches(bearer)) {
                     authorized = true;
                 }
             }
@@ -579,13 +734,13 @@ fn handleToolsCall(sock: SOCKET, id: ?std.json.Value, root: std.json.Value) void
 // ── SSE transport ──────────────────────────────────────────────────
 
 fn handleSseConnect(sock: SOCKET) void {
-    const idx = sseAddClient(sock) orelse {
+    const slot = sseAddClient(sock) orelse {
         wsSend(sock, "HTTP/1.1 503 Service Unavailable\r\n" ++ CORS_HEADERS ++ "Content-Length: 0\r\n\r\n");
         _ = ws2.closesocket(sock);
         return;
     };
 
-    const session_id = sse_session_ids[idx][0..sse_session_lens[idx]];
+    const session_id = slot.session_id[0..slot.session_len];
 
     wsSend(sock, "HTTP/1.1 200 OK\r\n" ++ CORS_HEADERS ++
         "Content-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n");
@@ -597,14 +752,14 @@ fn handleSseConnect(sock: SOCKET) void {
     bridge.logPuts("[x64dbg-MCP Server] SSE client connected.\x00");
 
     // Keep connection alive until client disconnects or server stops
-    while (server_running) {
+    while (isRunning()) {
         Sleep(5000);
         // Send keep-alive comment
         const n = ws2.send(sock, ": keepalive\n\n", 13, 0);
         if (n <= 0) break;
     }
 
-    sseRemoveClient(idx);
+    sseRemoveClient(slot.index, sock);
     _ = ws2.closesocket(sock);
     bridge.logPuts("[x64dbg-MCP Server] SSE client disconnected.\x00");
 }
@@ -658,9 +813,9 @@ fn handleSseMessage(sock: SOCKET, body: []const u8, session_id: ?[]const u8) voi
     const resp_json = w.slice();
 
     // Try to push response via SSE channel
-    const sse_idx = if (session_id) |sid| sseFindBySessionId(sid) else null;
-    if (sse_idx) |idx| {
-        sseSendEvent(sse_clients[idx], "message", resp_json);
+    const sse_sock = if (session_id) |sid| sseFindBySessionId(sid) else null;
+    if (sse_sock) |sse_client| {
+        sseSendEvent(sse_client, "message", resp_json);
     }
 
     // Also respond on the POST connection

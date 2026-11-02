@@ -5,6 +5,7 @@ const bridge = @import("core/bridge.zig");
 const mcp = @import("core/mcp_server.zig");
 const config = @import("core/config.zig");
 const icons = @import("resources/icons.zig");
+const sync = @import("core/sync.zig");
 const tools_mod = @import("mcp/tools.zig");
 
 const PLUGIN_NAME = "x64dbg-MCP Server";
@@ -19,6 +20,9 @@ const MENU_CONFIG: c_int = 2;
 const MENU_ABOUT: c_int = 3;
 
 // ── Event log ring buffer ──────────────────────────────────────────
+//
+// The ring buffer is written from x64dbg's debugger callbacks and read
+// from the HTTP worker threads, so every access goes through the lock.
 const EVENT_LOG_SIZE = 64;
 const EVENT_MSG_SIZE = 192;
 
@@ -26,9 +30,17 @@ var event_log: [EVENT_LOG_SIZE][EVENT_MSG_SIZE]u8 = undefined;
 var event_log_lens: [EVENT_LOG_SIZE]usize = @splat(0);
 var event_log_head: usize = 0;
 var event_log_count: usize = 0;
+var event_log_lock: sync.Mutex = .{};
+
+pub fn initLocks() void {
+    event_log_lock.init();
+    debuggee_path_lock.init();
+}
 
 pub fn pushEvent(msg: []const u8) void {
     const len = @min(msg.len, EVENT_MSG_SIZE);
+    event_log_lock.lock();
+    defer event_log_lock.unlock();
     @memcpy(event_log[event_log_head][0..len], msg[0..len]);
     event_log_lens[event_log_head] = len;
     event_log_head = (event_log_head + 1) % EVENT_LOG_SIZE;
@@ -36,17 +48,28 @@ pub fn pushEvent(msg: []const u8) void {
 }
 
 pub fn getEventCount() usize {
+    event_log_lock.lock();
+    defer event_log_lock.unlock();
     return event_log_count;
 }
 
-pub fn getEvent(index: usize) []const u8 {
-    if (index >= event_log_count) return "";
+/// Copy the event at `index` into `dst` and return the event's full
+/// length.  The copy happens under the lock so the caller never reads a
+/// slot the debugger callback thread is already overwriting.
+pub fn copyEvent(index: usize, dst: []u8) usize {
+    event_log_lock.lock();
+    defer event_log_lock.unlock();
+    if (index >= event_log_count) return 0;
     const start = if (event_log_count < EVENT_LOG_SIZE) 0 else event_log_head;
     const i = (start + index) % EVENT_LOG_SIZE;
-    return event_log[i][0..event_log_lens[i]];
+    const n = @min(event_log_lens[i], dst.len);
+    @memcpy(dst[0..n], event_log[i][0..n]);
+    return event_log_lens[i];
 }
 
 pub fn clearEvents() void {
+    event_log_lock.lock();
+    defer event_log_lock.unlock();
     event_log_count = 0;
     event_log_head = 0;
 }
@@ -59,16 +82,26 @@ pub fn clearEvents() void {
 const DEBUGGEE_PATH_SIZE = 1024;
 var current_debuggee_path: [DEBUGGEE_PATH_SIZE]u8 = undefined;
 var current_debuggee_path_len: usize = 0;
+var debuggee_path_lock: sync.Mutex = .{};
 
 pub fn setCurrentDebuggeePath(path: []const u8) void {
     const len = @min(path.len, DEBUGGEE_PATH_SIZE - 1);
+    debuggee_path_lock.lock();
+    defer debuggee_path_lock.unlock();
     @memcpy(current_debuggee_path[0..len], path[0..len]);
     current_debuggee_path[len] = 0;
     current_debuggee_path_len = len;
 }
 
-pub fn getCurrentDebuggeePath() []const u8 {
-    return current_debuggee_path[0..current_debuggee_path_len];
+/// Copy the current debuggee path into `dst` and return its length.  The
+/// copy happens under the lock: the path is written by the debugger
+/// callback thread and read by an HTTP worker thread.
+pub fn copyCurrentDebuggeePath(dst: []u8) usize {
+    debuggee_path_lock.lock();
+    defer debuggee_path_lock.unlock();
+    const n = @min(current_debuggee_path_len, dst.len);
+    @memcpy(dst[0..n], current_debuggee_path[0..n]);
+    return n;
 }
 
 const HWND = ?*anyopaque;
@@ -78,6 +111,11 @@ extern "user32" fn MessageBoxA(hWnd: HWND, lpText: [*:0]const u8, lpCaption: [*:
 
 export fn pluginit(initStruct: *bridge.PLUG_INITSTRUCT) callconv(.c) c_int {
     bridge.init() catch return 0;
+
+    // The debugger callbacks and the HTTP worker threads share state, so
+    // the locks protecting it have to be ready before either side runs.
+    initLocks();
+    mcp.initLocks();
 
     initStruct.sdkVersion = bridge.PLUG_SDKVERSION;
     initStruct.pluginVersion = PLUGIN_VERSION;
@@ -184,7 +222,7 @@ export fn CBMENUENTRY(_: bridge.CBTYPE, info: *bridge.PLUG_CB_MENUENTRY) callcon
 }
 
 fn toggleServer() void {
-    if (mcp.server_running) {
+    if (mcp.isRunning()) {
         mcp.stop();
     } else {
         mcp.start();
@@ -195,7 +233,7 @@ fn toggleServer() void {
 fn rebuildMenu() void {
     _ = bridge._plugin_menuclear(main_menu);
 
-    if (mcp.server_running) {
+    if (mcp.isRunning()) {
         _ = bridge._plugin_menuaddentry(main_menu, MENU_TOGGLE, "&Stop MCP Server\x00");
         setEntryIcon(MENU_TOGGLE, icons.stop_icon);
     } else {

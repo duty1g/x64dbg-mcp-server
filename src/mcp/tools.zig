@@ -980,12 +980,14 @@ fn getEventLog(params: ?std.json.Value, out: []u8) ToolResult {
 
     var i: usize = start_idx;
     while (i < total) : (i += 1) {
-        const evt = main.getEvent(i);
-        if (pos + evt.len + 2 > out.len) break;
-        @memcpy(out[pos .. pos + evt.len], evt);
-        pos += evt.len;
+        const room = out.len - pos;
+        if (room < 2) break;
+        const evt_len = main.copyEvent(i, out[pos .. pos + room - 1]);
+        if (evt_len == 0) break;
+        pos += @min(evt_len, room - 1);
         out[pos] = '\n';
         pos += 1;
+        if (evt_len > room - 1) break;
     }
     return .{ .text = out[0..pos] };
 }
@@ -1444,9 +1446,11 @@ fn restartDebug(_: ?std.json.Value, out: []u8) ToolResult {
     if (!bridge.isDebugging())
         return errResult(out, "Error: No active debug session.");
 
-    const path = main.getCurrentDebuggeePath();
-    if (path.len == 0)
+    var path_buf: [1024]u8 = undefined;
+    const path_len = main.copyCurrentDebuggeePath(&path_buf);
+    if (path_len == 0)
         return errResult(out, "Error: Current debuggee path is unknown.");
+    const path = path_buf[0..path_len];
 
     const old_pid = bridge.valFromString("$pid");
 
