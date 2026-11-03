@@ -12,7 +12,7 @@ const INVALID_SOCKET = ws2.INVALID_SOCKET;
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_NAME = "x64dbg-MCP Server";
-pub const SERVER_VERSION = "1.6";
+pub const SERVER_VERSION = "1.7";
 
 // Win32 threading
 const HANDLE = ?*anyopaque;

@@ -3244,9 +3244,6 @@ fn setBookmark(params: ?std.json.Value, out: []u8) ToolResult {
     const addr = getParamAddr(params, "address", &addr_buf) orelse
         return errResult(out, "Error: address is required.");
     var cmd_buf: [128]u8 = undefined;
-    // x64dbg's command is "bookmarkset" (alias "bookmark"). "bookmarkadd" does
-    // not exist: the debugger answers "Unknown command" and the tool still
-    // reports success, because the command call itself succeeds.
     const cmd = std.fmt.bufPrint(&cmd_buf, "bookmarkset {s}\x00", .{addr}) catch
         return errResult(out, "Error: input too long.");
     const ok = bridge.cmdExec(@ptrCast(cmd.ptr));
