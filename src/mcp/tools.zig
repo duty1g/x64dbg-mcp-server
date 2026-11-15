@@ -1166,17 +1166,47 @@ fn waitForEvent(params: ?std.json.Value, out: []u8) ToolResult {
 }
 
 // ── ListCommandsByCategory ──────────────────────────────────────────
+fn containsInsensitive(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0 or needle.len > haystack.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        var match = true;
+        for (0..needle.len) |j| {
+            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(needle[j])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
 fn listCommandsByCategory(params: ?std.json.Value, out: []u8) ToolResult {
-    _ = params;
+    const category = getParamStr(params, "category");
     var w = JsonWriter.init(out);
-    w.raw("Available tools:\n");
+    w.raw("Available tools");
+    if (category) |cat| {
+        w.raw(" (filtered by \"");
+        w.raw(cat);
+        w.raw("\")");
+    }
+    w.raw(":\n");
+    var count: usize = 0;
     for (&tools) |*t| {
+        if (category) |cat| {
+            if (!containsInsensitive(t.name, cat) and !containsInsensitive(t.description, cat)) continue;
+        }
         w.raw("- ");
         w.raw(t.name);
         if (t.debug_only) w.raw(" [debug-only]");
         w.raw(": ");
         w.raw(t.description);
         w.raw("\n");
+        count += 1;
+    }
+    if (count == 0 and category != null) {
+        w.raw("(no tools matched)\n");
     }
     return .{ .text = w.slice() };
 }
@@ -2612,16 +2642,19 @@ fn setConditionalBreakpoint(params: ?std.json.Value, out: []u8) ToolResult {
     const condition = getParamStr(params, "condition") orelse
         return errResult(out, "Error: condition is required.");
 
-    var cmd_buf: [512]u8 = undefined;
-    const cmd_bp = std.fmt.bufPrint(&cmd_buf, "bp {s}\x00", .{addr_str}) catch
-        return errResult(out, "Error: input too long.");
-    if (!bridge.cmdExec(@ptrCast(cmd_bp.ptr)))
-        return errResult(out, "Error: Failed to set breakpoint.");
-
+    // Try setting condition on an existing breakpoint first (normal or hardware).
+    // Only create a new software bp if no breakpoint exists at this address.
     var cmd2_buf: [512]u8 = undefined;
     const cmd_cnd = std.fmt.bufPrint(&cmd2_buf, "bpcnd {s}, \"{s}\"\x00", .{ addr_str, condition }) catch
         return errResult(out, "Error: condition too long.");
-    _ = bridge.cmdExec(@ptrCast(cmd_cnd.ptr));
+    if (!bridge.cmdExec(@ptrCast(cmd_cnd.ptr))) {
+        var cmd_buf: [512]u8 = undefined;
+        const cmd_bp = std.fmt.bufPrint(&cmd_buf, "bp {s}\x00", .{addr_str}) catch
+            return errResult(out, "Error: input too long.");
+        if (!bridge.cmdExec(@ptrCast(cmd_bp.ptr)))
+            return errResult(out, "Error: Failed to set breakpoint.");
+        _ = bridge.cmdExec(@ptrCast(cmd_cnd.ptr));
+    }
 
     if (getParamStr(params, "log")) |log_text| {
         var cmd3_buf: [512]u8 = undefined;

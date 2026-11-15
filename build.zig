@@ -12,7 +12,6 @@ pub fn build(b: *std.Build) void {
             .abi = .gnu,
         }),
         .optimize = optimize,
-        .single_threaded = true,
     });
     x32_mod.linkSystemLibrary("kernel32", .{});
     x32_mod.linkSystemLibrary("ws2_32", .{});
@@ -40,7 +39,6 @@ pub fn build(b: *std.Build) void {
             .abi = .gnu,
         }),
         .optimize = optimize,
-        .single_threaded = true,
     });
     x64_mod.linkSystemLibrary("kernel32", .{});
     x64_mod.linkSystemLibrary("ws2_32", .{});

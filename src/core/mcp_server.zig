@@ -12,7 +12,7 @@ const INVALID_SOCKET = ws2.INVALID_SOCKET;
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_NAME = "x64dbg-MCP Server";
-pub const SERVER_VERSION = "1.7";
+pub const SERVER_VERSION = "1.8";
 
 // Win32 threading
 const HANDLE = ?*anyopaque;
@@ -565,6 +565,10 @@ fn handleToolsCall(sock: SOCKET, id: ?std.json.Value, root: std.json.Value) void
     var buf: [131072]u8 = undefined;
     var w = JsonWriter.init(&buf);
     buildToolsCallResult(&w, root);
+    if (w.overflow) {
+        sendJsonRpcError(sock, id, -32603, "Result too large — response buffer overflow");
+        return;
+    }
     const result_str = w.slice();
     if (std.mem.startsWith(u8, result_str, "{\"error\":")) {
         sendJsonRpcError(sock, id, -32602, result_str);

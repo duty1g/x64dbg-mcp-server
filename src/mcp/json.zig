@@ -7,13 +7,17 @@ const std = @import("std");
 pub const JsonWriter = struct {
     buf: []u8,
     pos: usize = 0,
+    overflow: bool = false,
 
     pub fn init(buf: []u8) JsonWriter {
-        return .{ .buf = buf, .pos = 0 };
+        return .{ .buf = buf, .pos = 0, .overflow = false };
     }
 
     pub fn raw(self: *JsonWriter, s: []const u8) void {
-        if (self.pos + s.len > self.buf.len) return;
+        if (self.pos + s.len > self.buf.len) {
+            self.overflow = true;
+            return;
+        }
         @memcpy(self.buf[self.pos..][0..s.len], s);
         self.pos += s.len;
     }
