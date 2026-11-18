@@ -304,6 +304,8 @@ const DbgDisasmFastAtFn = *const fn (addr: duint, info: *BASIC_INSTRUCTION_INFO)
 pub var DbgDisasmFastAt: ?DbgDisasmFastAtFn = null;
 const DbgGetBpListFn = *const fn (bptype: c_int, list: *BPMAP) callconv(.c) BOOL;
 pub var DbgGetBpList: ?DbgGetBpListFn = null;
+const DbgGetBpxTypeAtFn = *const fn (addr: usize) callconv(.c) BPXTYPE;
+pub var DbgGetBpxTypeAt: ?DbgGetBpxTypeAtFn = null;
 const DbgMemMapFn = *const fn (memmap: *MEMMAP) callconv(.c) BOOL;
 pub var DbgMemMap: ?DbgMemMapFn = null;
 const DbgGetThreadListFn = *const fn (list: *THREADLIST) callconv(.c) void;
@@ -375,6 +377,7 @@ pub fn init() !void {
     // Extended bridge functions (optional)
     DbgDisasmFastAt = resolveOptional(DbgDisasmFastAtFn, m, "DbgDisasmFastAt");
     DbgGetBpList = resolveOptional(DbgGetBpListFn, m, "DbgGetBpList");
+    DbgGetBpxTypeAt = resolveOptional(DbgGetBpxTypeAtFn, m, "DbgGetBpxTypeAt");
     DbgMemMap = resolveOptional(DbgMemMapFn, m, "DbgMemMap");
     DbgGetThreadList = resolveOptional(DbgGetThreadListFn, m, "DbgGetThreadList");
     BridgeFree = resolveOptional(BridgeFreeFn, m, "BridgeFree");

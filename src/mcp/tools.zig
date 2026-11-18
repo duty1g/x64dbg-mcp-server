@@ -1528,11 +1528,16 @@ fn setBreakpoint(params: ?std.json.Value, out: []u8) ToolResult {
     var target_buf: [32]u8 = undefined;
     const target = getParamAddr(params, "target", &target_buf) orelse
         return errResult(out, "Error: target is required.");
+    const addr = resolveAddr(target);
     var cmd_buf: [512]u8 = undefined;
     const cmd = std.fmt.bufPrint(&cmd_buf, "bp {s}\x00", .{target}) catch
         return errResult(out, "Error: target too long.");
     const ok = bridge.cmdExec(@ptrCast(cmd.ptr));
-    return fmtResult(out, "{s}", .{if (ok) "Breakpoint set." else "Failed to set breakpoint."});
+    if (!ok) return errResult(out, "Error: Failed to set breakpoint.");
+    // DbgCmdExec only reports queueing; verify the record really appeared.
+    if (addr != 0 and !waitBpType(addr, BP_FLAG_NORMAL, true, BP_VERIFY_TIMEOUT_MS))
+        return fmtErr(out, "Error: breakpoint was not created at '{s}'.", .{target});
+    return result(out, "Breakpoint set.");
 }
 
 // ── DeleteBreakpoint ────────────────────────────────────────────────
@@ -1540,11 +1545,40 @@ fn deleteBreakpoint(params: ?std.json.Value, out: []u8) ToolResult {
     var target_buf: [32]u8 = undefined;
     const target = getParamAddr(params, "target", &target_buf) orelse
         return errResult(out, "Error: target is required.");
-    var cmd_buf: [512]u8 = undefined;
-    const cmd = std.fmt.bufPrint(&cmd_buf, "bc {s}\x00", .{target}) catch
-        return errResult(out, "Error: target too long.");
-    const ok = bridge.cmdExec(@ptrCast(cmd.ptr));
-    return fmtResult(out, "{s}", .{if (ok) "Breakpoint deleted." else "Failed to delete breakpoint."});
+    const addr = resolveAddr(target);
+    if (addr == 0) return fmtErr(out, "Error: Could not resolve '{s}'.", .{target});
+    if (!anyBpAt(addr))
+        return fmtResult(out, "No breakpoint at '{s}' (nothing to delete).", .{target});
+
+    // The delete commands are type-scoped: bc deletes software breakpoints
+    // only, bphwc/bpmc hardware/memory ones. Pick the command that matches
+    // the breakpoint type actually present at the address, and verify the
+    // removal before reporting success.
+    if (bpHasType(addr, BP_FLAG_HARDWARE)) {
+        var cmd_buf: [512]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "bphwc {s}\x00", .{target}) catch
+            return errResult(out, "Error: target too long.");
+        _ = bridge.cmdExec(@ptrCast(cmd.ptr));
+        if (!waitBpType(addr, BP_FLAG_HARDWARE, false, BP_VERIFY_TIMEOUT_MS))
+            return fmtErr(out, "Error: hardware breakpoint at '{s}' could not be deleted.", .{target});
+    }
+    if (bpHasType(addr, BP_FLAG_NORMAL)) {
+        var cmd_buf: [512]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "bc {s}\x00", .{target}) catch
+            return errResult(out, "Error: target too long.");
+        _ = bridge.cmdExec(@ptrCast(cmd.ptr));
+        if (!waitBpType(addr, BP_FLAG_NORMAL, false, BP_VERIFY_TIMEOUT_MS))
+            return fmtErr(out, "Error: software breakpoint at '{s}' could not be deleted.", .{target});
+    }
+    if (bpHasType(addr, BP_FLAG_MEMORY)) {
+        var cmd_buf: [512]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "bpmc {s}\x00", .{target}) catch
+            return errResult(out, "Error: target too long.");
+        _ = bridge.cmdExec(@ptrCast(cmd.ptr));
+        if (!waitBpType(addr, BP_FLAG_MEMORY, false, BP_VERIFY_TIMEOUT_MS))
+            return fmtErr(out, "Error: memory breakpoint at '{s}' could not be deleted.", .{target});
+    }
+    return result(out, "Breakpoint deleted.");
 }
 
 // ── GetAllRegisters ─────────────────────────────────────────────────
@@ -1802,6 +1836,103 @@ fn listBreakpoints(_: ?std.json.Value, out: []u8) ToolResult {
     formatBps(f, 4, "Memory", out, &pos);
     if (pos == 0) return result(out, "No breakpoints set.");
     return .{ .text = out[0..pos] };
+}
+
+// ── Breakpoint effect verification ─────────────────────────────────
+// DbgCmdExec is asynchronous: its return value only confirms that the
+// command was queued, not that it succeeded. Breakpoint state is instead
+// verified here through the plugin API (DbgGetBpxTypeAt / DbgGetBpList),
+// so tools can report the actual outcome instead of a queueing result.
+
+const BP_TYPE_NORMAL: c_int = 1;
+const BP_TYPE_HARDWARE: c_int = 2;
+const BP_TYPE_MEMORY: c_int = 4;
+const BP_FLAG_NORMAL: u32 = 1;
+const BP_FLAG_HARDWARE: u32 = 2;
+const BP_FLAG_MEMORY: u32 = 4;
+const BP_VERIFY_TIMEOUT_MS: u64 = 2000;
+const BP_POLL_INTERVAL_MS: u64 = 100;
+
+fn bpHasType(addr: usize, flag: u32) bool {
+    const f = bridge.DbgGetBpxTypeAt orelse return false;
+    return (@intFromEnum(f(addr)) & flag) != 0;
+}
+
+fn waitBpType(addr: usize, flag: u32, want_present: bool, timeout_ms: u64) bool {
+    const deadline = GetTickCount64() + timeout_ms;
+    while (true) {
+        if (bpHasType(addr, flag) == want_present) return true;
+        if (GetTickCount64() >= deadline) return bpHasType(addr, flag) == want_present;
+        Sleep(BP_POLL_INTERVAL_MS);
+    }
+}
+
+/// Copy the BRIDGEBP record for addr (from the given type's list) into
+/// out, so it stays readable after the list is freed with BridgeFree.
+fn copyBpRecord(bptype: c_int, addr: usize, out: *bridge.BRIDGEBP) bool {
+    const f = bridge.DbgGetBpList orelse return false;
+    var bpmap: bridge.BPMAP = undefined;
+    if (f(bptype, &bpmap) == .FALSE or bpmap.count <= 0) return false;
+    defer if (bridge.BridgeFree) |free| free(@ptrCast(bpmap.bp));
+    const count: usize = @intCast(bpmap.count);
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        if (bpmap.bp[i].addr == addr) {
+            out.* = bpmap.bp[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+const BpTextField = enum { break_condition, log_text };
+
+fn bpTextField(bp: *const bridge.BRIDGEBP, field: BpTextField) []const u8 {
+    return switch (field) {
+        .break_condition => bridge.cstrSlice(&bp.breakCondition),
+        .log_text => bridge.cstrSlice(&bp.logText),
+    };
+}
+
+fn eqTrimmed(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, std.mem.trim(u8, a, " \t\r\n\x00"), std.mem.trim(u8, b, " \t\r\n\x00"));
+}
+
+fn waitBpTextField(bptype: c_int, addr: usize, field: BpTextField, expect: []const u8, timeout_ms: u64) bool {
+    const deadline = GetTickCount64() + timeout_ms;
+    while (true) {
+        var bp: bridge.BRIDGEBP = undefined;
+        if (copyBpRecord(bptype, addr, &bp)) {
+            if (eqTrimmed(bpTextField(&bp, field), expect)) return true;
+        }
+        if (GetTickCount64() >= deadline) return false;
+        Sleep(BP_POLL_INTERVAL_MS);
+    }
+}
+
+/// Does any breakpoint (normal/hardware/memory) exist at addr?
+fn anyBpAt(addr: usize) bool {
+    return bpHasType(addr, BP_FLAG_NORMAL | BP_FLAG_HARDWARE | BP_FLAG_MEMORY);
+}
+
+fn bpTypeListEmpty(bptype: c_int) bool {
+    const f = bridge.DbgGetBpList orelse return true;
+    var bpmap: bridge.BPMAP = undefined;
+    if (f(bptype, &bpmap) == .FALSE) return true;
+    const empty = bpmap.count <= 0;
+    if (!empty) {
+        if (bridge.BridgeFree) |free| free(@ptrCast(bpmap.bp));
+    }
+    return empty;
+}
+
+fn waitBpTypeListEmpty(bptype: c_int, timeout_ms: u64) bool {
+    const deadline = GetTickCount64() + timeout_ms;
+    while (true) {
+        if (bpTypeListEmpty(bptype)) return true;
+        if (GetTickCount64() >= deadline) return bpTypeListEmpty(bptype);
+        Sleep(BP_POLL_INTERVAL_MS);
+    }
 }
 
 fn formatBps(f: anytype, bptype: c_int, type_name: []const u8, out: []u8, pos: *usize) void {
@@ -2104,11 +2235,16 @@ fn setHardwareBreakpoint(params: ?std.json.Value, out: []u8) ToolResult {
         return errResult(out, "Error: address is required.");
     const bp_type = getParamStr(params, "type") orelse "x";
     const size = getParamInt(params, "size") orelse 1;
+    const addr = resolveAddr(addr_str);
     var cmd_buf: [256]u8 = undefined;
     const cmd = std.fmt.bufPrint(&cmd_buf, "bphws {s}, {s}, {d}\x00", .{ addr_str, bp_type, size }) catch
         return errResult(out, "Error: input too long.");
     const ok = bridge.cmdExec(@ptrCast(cmd.ptr));
-    return fmtResult(out, "{s}", .{if (ok) "Hardware breakpoint set." else "Failed to set hardware breakpoint."});
+    if (!ok) return errResult(out, "Error: Failed to set hardware breakpoint.");
+    // DbgCmdExec only reports queueing; verify the record really appeared.
+    if (addr != 0 and !waitBpType(addr, BP_FLAG_HARDWARE, true, BP_VERIFY_TIMEOUT_MS))
+        return fmtErr(out, "Error: hardware breakpoint was not created at '{s}'.", .{addr_str});
+    return result(out, "Hardware breakpoint set.");
 }
 
 // ── SetMemoryBreakpoint ────────────────────────────────────────────
@@ -2634,6 +2770,13 @@ fn traceInto(params: ?std.json.Value, out: []u8) ToolResult {
 }
 
 // ── SetConditionalBreakpoint ──────────────────────────────────────
+// Condition commands are type-scoped inside x64dbg: the Bp lookup is done
+// by (address, BP_TYPE), so bpcnd/bplog only ever touch SOFTWARE
+// breakpoints and silently do nothing on hardware ones (and vice versa
+// for bphwcond/bphwlog). This tool therefore conditions every breakpoint
+// type present at the address with the matching command family, creates
+// a software breakpoint when none exists, and verifies the stored
+// condition/log text through DbgGetBpList before reporting success.
 fn setConditionalBreakpoint(params: ?std.json.Value, out: []u8) ToolResult {
     if (!bridge.isDebugging()) return errResult(out, "Error: No active debug session.");
     var addr_buf: [32]u8 = undefined;
@@ -2641,28 +2784,60 @@ fn setConditionalBreakpoint(params: ?std.json.Value, out: []u8) ToolResult {
         return errResult(out, "Error: address is required.");
     const condition = getParamStr(params, "condition") orelse
         return errResult(out, "Error: condition is required.");
+    const addr = resolveAddr(addr_str);
+    if (addr == 0) return fmtErr(out, "Error: Could not resolve '{s}'.", .{addr_str});
 
-    // Try setting condition on an existing breakpoint first (normal or hardware).
-    // Only create a new software bp if no breakpoint exists at this address.
-    var cmd2_buf: [512]u8 = undefined;
-    const cmd_cnd = std.fmt.bufPrint(&cmd2_buf, "bpcnd {s}, \"{s}\"\x00", .{ addr_str, condition }) catch
-        return errResult(out, "Error: condition too long.");
-    if (!bridge.cmdExec(@ptrCast(cmd_cnd.ptr))) {
-        var cmd_buf: [512]u8 = undefined;
-        const cmd_bp = std.fmt.bufPrint(&cmd_buf, "bp {s}\x00", .{addr_str}) catch
+    var has_sw = bpHasType(addr, BP_FLAG_NORMAL);
+    const has_hw = bpHasType(addr, BP_FLAG_HARDWARE);
+
+    // No breakpoint here yet: create a software one and verify it appears.
+    if (!has_sw and !has_hw) {
+        var mk_buf: [512]u8 = undefined;
+        const mk = std.fmt.bufPrint(&mk_buf, "bp {s}\x00", .{addr_str}) catch
             return errResult(out, "Error: input too long.");
-        if (!bridge.cmdExec(@ptrCast(cmd_bp.ptr)))
-            return errResult(out, "Error: Failed to set breakpoint.");
-        _ = bridge.cmdExec(@ptrCast(cmd_cnd.ptr));
+        _ = bridge.cmdExec(@ptrCast(mk.ptr));
+        if (!waitBpType(addr, BP_FLAG_NORMAL, true, BP_VERIFY_TIMEOUT_MS))
+            return fmtErr(out, "Error: no breakpoint exists at '{s}' and creating one failed.", .{addr_str});
+        has_sw = true;
+    }
+
+    if (has_sw) {
+        var c_buf: [512]u8 = undefined;
+        const c = std.fmt.bufPrint(&c_buf, "bpcnd {s}, \"{s}\"\x00", .{ addr_str, condition }) catch
+            return errResult(out, "Error: condition too long.");
+        _ = bridge.cmdExec(@ptrCast(c.ptr));
+        if (!waitBpTextField(BP_TYPE_NORMAL, addr, .break_condition, condition, BP_VERIFY_TIMEOUT_MS))
+            return fmtErr(out, "Error: break condition was not applied to the software breakpoint at '{s}'.", .{addr_str});
+    }
+    if (has_hw) {
+        var c_buf: [512]u8 = undefined;
+        const c = std.fmt.bufPrint(&c_buf, "bphwcond {s}, \"{s}\"\x00", .{ addr_str, condition }) catch
+            return errResult(out, "Error: condition too long.");
+        _ = bridge.cmdExec(@ptrCast(c.ptr));
+        if (!waitBpTextField(BP_TYPE_HARDWARE, addr, .break_condition, condition, BP_VERIFY_TIMEOUT_MS))
+            return fmtErr(out, "Error: break condition was not applied to the hardware breakpoint at '{s}'.", .{addr_str});
     }
 
     if (getParamStr(params, "log")) |log_text| {
-        var cmd3_buf: [512]u8 = undefined;
-        _ = std.fmt.bufPrint(&cmd3_buf, "bplog {s}, \"{s}\"\x00", .{ addr_str, log_text }) catch return fmtResult(out, "Breakpoint set, but log text too long.", .{});
-        _ = bridge.cmdExec(@ptrCast(cmd3_buf[0..].ptr));
+        if (has_sw) {
+            var l_buf: [512]u8 = undefined;
+            const l = std.fmt.bufPrint(&l_buf, "bplog {s}, \"{s}\"\x00", .{ addr_str, log_text }) catch
+                return fmtResult(out, "Conditional breakpoint set, but log text too long.", .{});
+            _ = bridge.cmdExec(@ptrCast(l.ptr));
+            if (!waitBpTextField(BP_TYPE_NORMAL, addr, .log_text, log_text, BP_VERIFY_TIMEOUT_MS))
+                return fmtErr(out, "Error: log text was not applied to the software breakpoint at '{s}'.", .{addr_str});
+        }
+        if (has_hw) {
+            var l_buf: [512]u8 = undefined;
+            const l = std.fmt.bufPrint(&l_buf, "bphwlog {s}, \"{s}\"\x00", .{ addr_str, log_text }) catch
+                return fmtResult(out, "Conditional breakpoint set, but log text too long.", .{});
+            _ = bridge.cmdExec(@ptrCast(l.ptr));
+            if (!waitBpTextField(BP_TYPE_HARDWARE, addr, .log_text, log_text, BP_VERIFY_TIMEOUT_MS))
+                return fmtErr(out, "Error: log text was not applied to the hardware breakpoint at '{s}'.", .{addr_str});
+        }
     }
 
-    return fmtResult(out, "Conditional breakpoint set at {s} with condition: {s}", .{ addr_str, condition });
+    return fmtResult(out, "Conditional breakpoint set at {s} with condition: {s} (verified)", .{ addr_str, condition });
 }
 
 // ── FollowPointer ─────────────────────────────────────────────────
@@ -3019,10 +3194,56 @@ fn toggleBreakpoint(params: ?std.json.Value, out: []u8) ToolResult {
 // ── DeleteAllBreakpoints ──────────────────────────────────────────
 fn deleteAllBreakpoints(_: ?std.json.Value, out: []u8) ToolResult {
     if (!bridge.isDebugging()) return errResult(out, "Error: No active debug session.");
-    _ = bridge.cmdExec("bpc\x00");
-    _ = bridge.cmdExec("bphc *\x00");
-    _ = bridge.cmdExec("bpmc *\x00");
-    return result(out, "All breakpoints deleted (normal, hardware, memory).");
+
+    // Delete per entry instead of relying on wildcard delete commands:
+    // `bphc *`/`bpmc *` are rejected by the command parser (verified:
+    // hardware breakpoints survived a delete-all), and bare `bpc` does
+    // not touch hardware/memory breakpoints either. Enumeration and
+    // verification are driven from the plugin API so the reported result
+    // reflects actual breakpoint state.
+    const families = [_]struct { bptype: c_int, cmd: []const u8, name: []const u8 }{
+        .{ .bptype = BP_TYPE_NORMAL, .cmd = "bpc", .name = "software" },
+        .{ .bptype = BP_TYPE_HARDWARE, .cmd = "bphwc", .name = "hardware" },
+        .{ .bptype = BP_TYPE_MEMORY, .cmd = "bpmc", .name = "memory" },
+    };
+
+    var deleted: [3]usize = .{ 0, 0, 0 };
+
+    for (families, 0..) |fam, idx| {
+        const f = bridge.DbgGetBpList orelse return errResult(out, "Error: Breakpoint list not available.");
+        var bpmap: bridge.BPMAP = undefined;
+        if (f(fam.bptype, &bpmap) == .FALSE or bpmap.count <= 0) continue;
+        const count: usize = @intCast(bpmap.count);
+        var addrs: [128]usize = undefined;
+        const n = @min(count, addrs.len);
+        var i: usize = 0;
+        while (i < n) : (i += 1) addrs[i] = bpmap.bp[i].addr;
+        if (bridge.BridgeFree) |free| free(@ptrCast(bpmap.bp));
+
+        i = 0;
+        while (i < n) : (i += 1) {
+            var cmd_buf: [128]u8 = undefined;
+            const cmd = std.fmt.bufPrint(&cmd_buf, "{s} 0x{X}\x00", .{ fam.cmd, addrs[i] }) catch continue;
+            _ = bridge.cmdExec(@ptrCast(cmd.ptr));
+            deleted[idx] += 1;
+        }
+        if (!waitBpTypeListEmpty(fam.bptype, BP_VERIFY_TIMEOUT_MS)) {
+            const remaining: usize = blk: {
+                const lf = bridge.DbgGetBpList orelse break :blk 0;
+                var lm: bridge.BPMAP = undefined;
+                if (lf(fam.bptype, &lm) == .FALSE) break :blk 0;
+                const c: usize = @intCast(lm.count);
+                if (c > 0) {
+                    if (bridge.BridgeFree) |free| free(@ptrCast(lm.bp));
+                }
+                break :blk c;
+            };
+            if (remaining > 0)
+                return fmtErr(out, "Error: {s} breakpoints not fully removed ({d} remaining).", .{ fam.name, remaining });
+        }
+    }
+
+    return fmtResult(out, "All breakpoints deleted (verified): {} software, {} hardware, {} memory.", .{ deleted[0], deleted[1], deleted[2] });
 }
 
 // ── ResetHitCount ─────────────────────────────────────────────────
