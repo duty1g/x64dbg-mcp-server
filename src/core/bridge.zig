@@ -304,6 +304,8 @@ const DbgDisasmFastAtFn = *const fn (addr: duint, info: *BASIC_INSTRUCTION_INFO)
 pub var DbgDisasmFastAt: ?DbgDisasmFastAtFn = null;
 const DbgGetBpListFn = *const fn (bptype: c_int, list: *BPMAP) callconv(.c) BOOL;
 pub var DbgGetBpList: ?DbgGetBpListFn = null;
+const DbgGetBpxTypeAtFn = *const fn (addr: usize) callconv(.c) BPXTYPE;
+pub var DbgGetBpxTypeAt: ?DbgGetBpxTypeAtFn = null;
 const DbgMemMapFn = *const fn (memmap: *MEMMAP) callconv(.c) BOOL;
 pub var DbgMemMap: ?DbgMemMapFn = null;
 const DbgGetThreadListFn = *const fn (list: *THREADLIST) callconv(.c) void;
@@ -375,6 +377,7 @@ pub fn init() !void {
     // Extended bridge functions (optional)
     DbgDisasmFastAt = resolveOptional(DbgDisasmFastAtFn, m, "DbgDisasmFastAt");
     DbgGetBpList = resolveOptional(DbgGetBpListFn, m, "DbgGetBpList");
+    DbgGetBpxTypeAt = resolveOptional(DbgGetBpxTypeAtFn, m, "DbgGetBpxTypeAt");
     DbgMemMap = resolveOptional(DbgMemMapFn, m, "DbgMemMap");
     DbgGetThreadList = resolveOptional(DbgGetThreadListFn, m, "DbgGetThreadList");
     BridgeFree = resolveOptional(BridgeFreeFn, m, "BridgeFree");
@@ -405,15 +408,15 @@ pub fn logPuts(msg: [*:0]const u8) void {
 // Our fn pointers declare BOOL (i32 / full EAX). On x86 the upper
 // 3 bytes of EAX can be garbage, so mask to the low byte.
 pub fn isDebugging() bool {
-    return (@as(u32, @bitCast(DbgIsDebugging())) & 0xFF) != 0;
+    return (@as(i32, @intFromEnum(DbgIsDebugging())) & 0xFF) != 0;
 }
 
 pub fn isRunning() bool {
-    return (@as(u32, @bitCast(DbgIsRunning())) & 0xFF) != 0;
+    return (@as(i32, @intFromEnum(DbgIsRunning())) & 0xFF) != 0;
 }
 
 pub fn isRunLocked() bool {
-    return (@as(u32, @bitCast(DbgIsRunLocked())) & 0xFF) != 0;
+    return (@as(i32, @intFromEnum(DbgIsRunLocked())) & 0xFF) != 0;
 }
 
 pub fn valFromString(expr: [*:0]const u8) duint {
@@ -421,31 +424,31 @@ pub fn valFromString(expr: [*:0]const u8) duint {
 }
 
 pub fn cmdExec(cmd: [*:0]const u8) bool {
-    return DbgCmdExec(cmd) != 0;
+    return DbgCmdExec(cmd) != .FALSE;
 }
 
 pub fn cmdExecDirect(cmd: [*:0]const u8) bool {
-    return DbgCmdExecDirect(cmd) != 0;
+    return DbgCmdExecDirect(cmd) != .FALSE;
 }
 
 pub fn memRead(addr: duint, buf: []u8) bool {
-    return DbgMemRead(addr, buf.ptr, buf.len) != 0;
+    return DbgMemRead(addr, buf.ptr, buf.len) != .FALSE;
 }
 
 pub fn memWrite(addr: duint, data: []const u8) bool {
-    return DbgMemWrite(addr, data.ptr, data.len) != 0;
+    return DbgMemWrite(addr, data.ptr, data.len) != .FALSE;
 }
 
 pub fn getLabelAt(addr: duint, buf: *[MAX_LABEL_SIZE]u8) bool {
-    return DbgGetLabelAt(addr, 0, buf) != 0;
+    return DbgGetLabelAt(addr, 0, buf) != .FALSE;
 }
 
 pub fn getCommentAt(addr: duint, buf: *[MAX_COMMENT_SIZE]u8) bool {
-    return DbgGetCommentAt(addr, buf) != 0;
+    return DbgGetCommentAt(addr, buf) != .FALSE;
 }
 
 pub fn getModuleAt(addr: duint, buf: *[MAX_MODULE_SIZE]u8) bool {
-    return DbgGetModuleAt(addr, buf) != 0;
+    return DbgGetModuleAt(addr, buf) != .FALSE;
 }
 
 pub fn cstrSlice(buf: []const u8) []const u8 {

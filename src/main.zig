@@ -91,9 +91,9 @@ export fn pluginit(initStruct: *bridge.PLUG_INITSTRUCT) callconv(.c) c_int {
     plugin_handle = initStruct.pluginHandle;
     bridge.logPuts("[x64dbg-MCP Server] Plugin initialized.\x00");
 
-    _ = bridge._plugin_registercommand(plugin_handle, "StartMCPServer\x00", cmdStartServer, 0);
+    _ = bridge._plugin_registercommand(plugin_handle, "StartMCPServer\x00", cmdStartServer, .FALSE);
     bridge.logPuts("[x64dbg-MCP Server] Command \"StartMCPServer\" registered!\x00");
-    _ = bridge._plugin_registercommand(plugin_handle, "StopMCPServer\x00", cmdStopServer, 0);
+    _ = bridge._plugin_registercommand(plugin_handle, "StopMCPServer\x00", cmdStopServer, .FALSE);
     bridge.logPuts("[x64dbg-MCP Server] Command \"StopMCPServer\" registered!\x00");
 
     return 1;
@@ -347,14 +347,14 @@ fn showAbout() void {
 
 // ── Commands ────────────────────────────────────────────────────────
 
-fn cmdStartServer(_: c_int, _: [*]const [*:0]const u8) callconv(.c) c_int {
+fn cmdStartServer(_: c_int, _: [*]const [*:0]const u8) callconv(.c) std.os.windows.BOOL {
     mcp.start();
-    return 1;
+    return .TRUE;
 }
 
-fn cmdStopServer(_: c_int, _: [*]const [*:0]const u8) callconv(.c) c_int {
+fn cmdStopServer(_: c_int, _: [*]const [*:0]const u8) callconv(.c) std.os.windows.BOOL {
     mcp.stop();
-    return 1;
+    return .TRUE;
 }
 
 // ── Callbacks ───────────────────────────────────────────────────────
