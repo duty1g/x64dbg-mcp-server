@@ -7,8 +7,33 @@ const json_mod = @import("../mcp/json.zig");
 const JsonWriter = json_mod.JsonWriter;
 
 const ws2 = std.os.windows.ws2_32;
-const SOCKET = ws2.SOCKET;
-const INVALID_SOCKET = ws2.INVALID_SOCKET;
+const win32 = std.os.windows;
+
+// zig 0.16.0-stable stripped SOCKET/INVALID_SOCKET/WSADATA and the extern
+// function declarations out of std.os.windows.ws2_32 (constants/structs only).
+// Re-declare what this module uses; build.zig already links ws2_32.
+const SOCKET = usize;
+const INVALID_SOCKET: SOCKET = ~@as(SOCKET, 0);
+const WSADATA = extern struct {
+    wVersion: win32.WORD,
+    wHighVersion: win32.WORD,
+    iMaxSockets: u16,
+    iMaxUdpDg: u16,
+    lpVendorInfo: *u8,
+    szDescription: [257]u8, // WSADESCRIPTION_LEN + 1
+    szSystemStatus: [129]u8, // WSASYS_STATUS_LEN + 1
+};
+extern "ws2_32" fn WSAStartup(wVersionRequired: win32.WORD, lpWSAData: *WSADATA) callconv(.winapi) c_int;
+extern "ws2_32" fn WSACleanup() callconv(.winapi) c_int;
+extern "ws2_32" fn socket(af: c_int, @"type": c_int, protocol: c_int) callconv(.winapi) SOCKET;
+extern "ws2_32" fn bind(s: SOCKET, name: *const ws2.sockaddr, namelen: i32) callconv(.winapi) c_int;
+extern "ws2_32" fn listen(s: SOCKET, backlog: c_int) callconv(.winapi) c_int;
+extern "ws2_32" fn accept(s: SOCKET, addr: ?*ws2.sockaddr, addrlen: ?*i32) callconv(.winapi) SOCKET;
+extern "ws2_32" fn closesocket(s: SOCKET) callconv(.winapi) c_int;
+extern "ws2_32" fn send(s: SOCKET, buf: [*]const u8, len: c_int, flags: u32) callconv(.winapi) c_int;
+extern "ws2_32" fn recv(s: SOCKET, buf: [*]u8, len: c_int, flags: c_int) callconv(.winapi) c_int;
+extern "ws2_32" fn setsockopt(s: SOCKET, level: c_int, optname: c_int, optval: ?[*]const u8, optlen: i32) callconv(.winapi) c_int;
+extern "ws2_32" fn htons(hostshort: u16) callconv(.winapi) u16;
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_NAME = "x64dbg-MCP Server";
@@ -295,14 +320,14 @@ pub fn stop() void {
     // Close all SSE client sockets to unblock their keepalive loops
     for (&sse_clients) |*slot| {
         if (slot.* != INVALID_SOCKET) {
-            _ = ws2.closesocket(slot.*);
+            _ = closesocket(slot.*);
             slot.* = INVALID_SOCKET;
         }
     }
 
     // Close listen socket to unblock accept()
     if (listen_sock != INVALID_SOCKET) {
-        _ = ws2.closesocket(listen_sock);
+        _ = closesocket(listen_sock);
         listen_sock = INVALID_SOCKET;
     }
 
@@ -335,49 +360,49 @@ fn serverThreadProc(_: ?*anyopaque) callconv(.winapi) u32 {
 }
 
 fn clientThreadProc(param: ?*anyopaque) callconv(.winapi) u32 {
-    const sock: SOCKET = @ptrCast(@alignCast(param));
+    const sock: SOCKET = @intFromPtr(param);
     handleClient(sock);
     return 0;
 }
 
 fn serverLoop() void {
-    var wsa_data: ws2.WSADATA = undefined;
-    if (ws2.WSAStartup(0x0202, &wsa_data) != 0) {
+    var wsa_data: WSADATA = undefined;
+    if (WSAStartup(0x0202, &wsa_data) != 0) {
         server_running = false;
         bridge.logPuts("[x64dbg-MCP Server] WSAStartup failed.\x00");
         return;
     }
 
-    const sock = ws2.socket(ws2.AF.INET, ws2.SOCK.STREAM, 0);
+    const sock = socket(ws2.AF.INET, ws2.SOCK.STREAM, 0);
     if (sock == INVALID_SOCKET) {
         server_running = false;
         bridge.logPuts("[x64dbg-MCP Server] socket() failed.\x00");
-        _ = ws2.WSACleanup();
+        _ = WSACleanup();
         return;
     }
     listen_sock = sock;
     defer {
-        _ = ws2.closesocket(sock);
+        _ = closesocket(sock);
         listen_sock = INVALID_SOCKET;
-        _ = ws2.WSACleanup();
+        _ = WSACleanup();
     }
 
     const one: i32 = 1;
-    _ = ws2.setsockopt(sock, ws2.SOL.SOCKET, ws2.SO.REUSEADDR, @ptrCast(&one), @sizeOf(i32));
+    _ = setsockopt(sock, ws2.SOL.SOCKET, ws2.SO.REUSEADDR, @ptrCast(&one), @sizeOf(i32));
 
     var addr: ws2.sockaddr.in = .{
         .family = ws2.AF.INET,
-        .port = ws2.htons(server_port),
+        .port = htons(server_port),
         .addr = parseIpAddr(server_ip[0..server_ip_len]),
     };
 
-    if (ws2.bind(sock, @ptrCast(&addr), @sizeOf(ws2.sockaddr.in)) != 0) {
+    if (bind(sock, @ptrCast(&addr), @sizeOf(ws2.sockaddr.in)) != 0) {
         server_running = false;
         bridge.logPuts("[x64dbg-MCP Server] bind() failed.\x00");
         return;
     }
 
-    if (ws2.listen(sock, 10) != 0) {
+    if (listen(sock, 10) != 0) {
         server_running = false;
         bridge.logPuts("[x64dbg-MCP Server] listen() failed.\x00");
         return;
@@ -386,15 +411,15 @@ fn serverLoop() void {
     logListening();
 
     while (server_running) {
-        const client = ws2.accept(sock, null, null);
+        const client = accept(sock, null, null);
         if (client == INVALID_SOCKET) {
             if (!server_running) break;
             continue;
         }
 
-        const h = CreateThread(null, 0, clientThreadProc, @ptrCast(@alignCast(client)), 0, null);
+        const h = CreateThread(null, 0, clientThreadProc, @ptrFromInt(client), 0, null);
         if (h == null) {
-            _ = ws2.closesocket(client);
+            _ = closesocket(client);
         } else {
             _ = CloseHandle(h);
         }
@@ -409,7 +434,7 @@ fn wsSend(sock: SOCKET, data: []const u8) void {
     while (sent < data.len) {
         const remaining = data.len - sent;
         const chunk: i32 = @intCast(@min(remaining, 0x7FFFFFFF));
-        const n = ws2.send(sock, @ptrCast(data.ptr + sent), chunk, 0);
+        const n = send(sock, @ptrCast(data.ptr + sent), chunk, 0);
         if (n <= 0) return;
         sent += @intCast(n);
     }
@@ -422,7 +447,7 @@ fn wsRecv(sock: SOCKET) RecvResult {
 
     while (result.len < result.buf.len) {
         const max_len: i32 = @intCast(@min(result.buf.len - result.len, 0x7FFFFFFF));
-        const n = ws2.recv(sock, result.buf[result.len..].ptr, max_len, 0);
+        const n = recv(sock, result.buf[result.len..].ptr, max_len, 0);
         if (n <= 0) return result;
         result.len += @intCast(n);
 
@@ -437,7 +462,7 @@ fn wsRecv(sock: SOCKET) RecvResult {
 fn handleClient(sock: SOCKET) void {
     const recv_result = wsRecv(sock);
     if (recv_result.len == 0) {
-        _ = ws2.closesocket(sock);
+        _ = closesocket(sock);
         return;
     }
 
@@ -446,7 +471,7 @@ fn handleClient(sock: SOCKET) void {
 
     if (std.mem.startsWith(u8, method_line, "OPTIONS ")) {
         wsSend(sock, "HTTP/1.1 204 No Content\r\n" ++ CORS_HEADERS ++ "\r\n");
-        _ = ws2.closesocket(sock);
+        _ = closesocket(sock);
         return;
     }
 
@@ -464,7 +489,7 @@ fn handleClient(sock: SOCKET) void {
         }
         if (!authorized) {
             wsSend(sock, "HTTP/1.1 401 Unauthorized\r\n" ++ CORS_HEADERS ++ "Content-Length: 24\r\n\r\n{\"error\":\"Unauthorized\"}");
-            _ = ws2.closesocket(sock);
+            _ = closesocket(sock);
             return;
         }
     }
@@ -473,7 +498,7 @@ fn handleClient(sock: SOCKET) void {
         const path = getPath(method_line);
         if (std.mem.indexOf(u8, path, ".well-known") != null) {
             wsSend(sock, "HTTP/1.1 404 Not Found\r\n" ++ CORS_HEADERS ++ "Content-Length: 0\r\n\r\n");
-            _ = ws2.closesocket(sock);
+            _ = closesocket(sock);
             return;
         }
         if (std.mem.eql(u8, path, "/sse")) {
@@ -481,7 +506,7 @@ fn handleClient(sock: SOCKET) void {
             return;
         }
         sendServerInfo(sock);
-        _ = ws2.closesocket(sock);
+        _ = closesocket(sock);
         return;
     }
 
@@ -489,7 +514,7 @@ fn handleClient(sock: SOCKET) void {
         const path = getPath(method_line);
         if (std.mem.indexOf(u8, path, ".well-known") != null) {
             wsSend(sock, "HTTP/1.1 404 Not Found\r\n" ++ CORS_HEADERS ++ "Content-Length: 0\r\n\r\n");
-            _ = ws2.closesocket(sock);
+            _ = closesocket(sock);
             return;
         }
 
@@ -507,12 +532,12 @@ fn handleClient(sock: SOCKET) void {
         } else {
             wsSend(sock, "HTTP/1.1 400 Bad Request\r\n" ++ CORS_HEADERS ++ "Content-Length: 0\r\n\r\n");
         }
-        _ = ws2.closesocket(sock);
+        _ = closesocket(sock);
         return;
     }
 
     wsSend(sock, "HTTP/1.1 405 Method Not Allowed\r\n" ++ CORS_HEADERS ++ "Content-Length: 0\r\n\r\n");
-    _ = ws2.closesocket(sock);
+    _ = closesocket(sock);
 }
 
 fn handleJsonRpc(sock: SOCKET, body: []const u8) void {
@@ -582,7 +607,7 @@ fn handleToolsCall(sock: SOCKET, id: ?std.json.Value, root: std.json.Value) void
 fn handleSseConnect(sock: SOCKET) void {
     const idx = sseAddClient(sock) orelse {
         wsSend(sock, "HTTP/1.1 503 Service Unavailable\r\n" ++ CORS_HEADERS ++ "Content-Length: 0\r\n\r\n");
-        _ = ws2.closesocket(sock);
+        _ = closesocket(sock);
         return;
     };
 
@@ -601,12 +626,12 @@ fn handleSseConnect(sock: SOCKET) void {
     while (server_running) {
         Sleep(5000);
         // Send keep-alive comment
-        const n = ws2.send(sock, ": keepalive\n\n", 13, 0);
+        const n = send(sock, ": keepalive\n\n", 13, 0);
         if (n <= 0) break;
     }
 
     sseRemoveClient(idx);
-    _ = ws2.closesocket(sock);
+    _ = closesocket(sock);
     bridge.logPuts("[x64dbg-MCP Server] SSE client disconnected.\x00");
 }
 
@@ -803,7 +828,7 @@ fn buildStateSnippet(buf: *[256]u8) []const u8 {
     const mod_name = if (has_mod) bridge.cstrSlice(&mod_buf) else "unknown";
 
     var dis_buf: [256]u8 = undefined;
-    const has_dis = if (bridge.GuiGetDisassembly) |f| f(cip, &dis_buf) != 0 else false;
+    const has_dis = if (bridge.GuiGetDisassembly) |f| f(cip, &dis_buf) != .FALSE else false;
     const dis_text = if (has_dis) bridge.cstrSlice(&dis_buf) else "";
 
     return std.fmt.bufPrint(buf, "[state] PAUSED at 0x{X} ({s}) | {s}", .{ cip, mod_name, dis_text }) catch buf[0..0];

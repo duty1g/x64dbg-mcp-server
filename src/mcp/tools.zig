@@ -1390,7 +1390,7 @@ fn appendStepContext(out: []u8, pos: *usize) void {
 
     const gui_fn = bridge.GuiGetDisassembly orelse return;
     var text_buf: [256]u8 = std.mem.zeroes([256]u8);
-    if (gui_fn(cip, &text_buf) != 0) {
+    if (gui_fn(cip, &text_buf) != .FALSE) {
         const instr = bridge.cstrSlice(&text_buf);
         if (instr.len > 0) {
             const dis_line = std.fmt.bufPrint(out[pos.*..], "\nInstruction: {s}", .{instr}) catch return;
@@ -1403,7 +1403,7 @@ fn appendStepContext(out: []u8, pos: *usize) void {
     const next_addr = bridge.valFromString(@ptrCast(next_expr.ptr));
     if (next_addr != 0 and next_addr != cip) {
         var text_buf2: [256]u8 = std.mem.zeroes([256]u8);
-        if (gui_fn(next_addr, &text_buf2) != 0) {
+        if (gui_fn(next_addr, &text_buf2) != .FALSE) {
             const next_instr = bridge.cstrSlice(&text_buf2);
             if (next_instr.len > 0) {
                 const next_line = std.fmt.bufPrint(out[pos.*..], "\nNext: 0x{X}  {s}", .{ next_addr, next_instr }) catch return;
@@ -1683,10 +1683,10 @@ fn commentOrLabelAtAddress(params: ?std.json.Value, out: []u8) ToolResult {
         return errResult(out, "Error: value too long.");
 
     if (std.mem.eql(u8, mode, "Label")) {
-        const ok = bridge.DbgSetLabelAt(addr, @ptrCast(val_z.ptr)) != 0;
+        const ok = bridge.DbgSetLabelAt(addr, @ptrCast(val_z.ptr)) != .FALSE;
         return fmtResult(out, "{s}", .{if (ok) "Label set." else "Failed to set label."});
     } else {
-        const ok = bridge.DbgSetCommentAt(addr, @ptrCast(val_z.ptr)) != 0;
+        const ok = bridge.DbgSetCommentAt(addr, @ptrCast(val_z.ptr)) != .FALSE;
         return fmtResult(out, "{s}", .{if (ok) "Comment set." else "Failed to set comment."});
     }
 }
@@ -1735,7 +1735,7 @@ fn disassemble(params: ?std.json.Value, out: []u8) ToolResult {
         var text_buf: [256]u8 = std.mem.zeroes([256]u8);
         var instr_text: []const u8 = "";
         if (gui_fn) |f| {
-            if (f(addr, &text_buf) != 0) {
+            if (f(addr, &text_buf) != .FALSE) {
                 instr_text = bridge.cstrSlice(&text_buf);
             }
         }
@@ -1759,7 +1759,7 @@ fn listModules(_: ?std.json.Value, out: []u8) ToolResult {
     const f = bridge.DbgMemMap orelse return errResult(out, "Error: Memory map not available.");
 
     var memmap: bridge.MEMMAP = undefined;
-    if ((@as(u32, @bitCast(f(&memmap))) & 0xFF) == 0) return errResult(out, "Error: Failed to get memory map.");
+    if ((@as(i32, @intFromEnum(f(&memmap))) & 0xFF) == 0) return errResult(out, "Error: Failed to get memory map.");
     defer {
         if (memmap.count > 0) {
             if (bridge.BridgeFree) |free| free(@ptrCast(memmap.page));
@@ -1806,7 +1806,7 @@ fn listBreakpoints(_: ?std.json.Value, out: []u8) ToolResult {
 
 fn formatBps(f: anytype, bptype: c_int, type_name: []const u8, out: []u8, pos: *usize) void {
     var bpmap: bridge.BPMAP = undefined;
-    if (f(bptype, &bpmap) != 0 and bpmap.count > 0) {
+    if (f(bptype, &bpmap) != .FALSE and bpmap.count > 0) {
         defer if (bridge.BridgeFree) |free| free(@ptrCast(bpmap.bp));
         const count: usize = @intCast(bpmap.count);
         var i: usize = 0;
@@ -1827,7 +1827,7 @@ fn getMemoryMap(_: ?std.json.Value, out: []u8) ToolResult {
     const f = bridge.DbgMemMap orelse return errResult(out, "Error: Memory map not available.");
 
     var memmap: bridge.MEMMAP = undefined;
-    if (f(&memmap) == 0) return errResult(out, "Error: Failed to get memory map.");
+    if (f(&memmap) == .FALSE) return errResult(out, "Error: Failed to get memory map.");
     defer {
         if (memmap.count > 0) {
             if (bridge.BridgeFree) |free| free(@ptrCast(memmap.page));
@@ -2618,7 +2618,7 @@ fn traceInto(params: ?std.json.Value, out: []u8) ToolResult {
         var text_buf: [256]u8 = std.mem.zeroes([256]u8);
         var instr: []const u8 = "";
         if (gui_fn) |gd| {
-            if ((@as(u32, @bitCast(gd(cip, &text_buf))) & 0xFF) != 0)
+            if ((@as(i32, @intFromEnum(gd(cip, &text_buf))) & 0xFF) != 0)
                 instr = bridge.cstrSlice(&text_buf);
         }
         const line = std.fmt.bufPrint(out[pos..], "0x{X}: {s}\n", .{ cip, instr }) catch break;
@@ -3081,7 +3081,7 @@ fn disassembleFunction(params: ?std.json.Value, out: []u8) ToolResult {
         var text_buf: [256]u8 = std.mem.zeroes([256]u8);
         var instr_text: []const u8 = "";
         if (gui_fn) |f| {
-            if (f(current, &text_buf) != 0) {
+            if (f(current, &text_buf) != .FALSE) {
                 instr_text = bridge.cstrSlice(&text_buf);
             }
         }
@@ -3110,7 +3110,7 @@ fn searchSymbols(params: ?std.json.Value, out: []u8) ToolResult {
 
     const f = bridge.DbgMemMap orelse return errResult(out, "Error: Memory map not available.");
     var memmap: bridge.MEMMAP = undefined;
-    if (f(&memmap) == 0) return errResult(out, "Error: Failed to get memory map.");
+    if (f(&memmap) == .FALSE) return errResult(out, "Error: Failed to get memory map.");
     defer {
         if (memmap.count > 0) {
             if (bridge.BridgeFree) |free| free(@ptrCast(memmap.page));
@@ -3516,7 +3516,7 @@ fn getDumpableRegions(_: ?std.json.Value, out: []u8) ToolResult {
 
     const f = bridge.DbgMemMap orelse return errResult(out, "Error: Memory map not available.");
     var memmap: bridge.MEMMAP = undefined;
-    if (f(&memmap) == 0) return errResult(out, "Error: Failed to get memory map.");
+    if (f(&memmap) == .FALSE) return errResult(out, "Error: Failed to get memory map.");
     defer {
         if (memmap.count > 0) {
             if (bridge.BridgeFree) |free| free(@ptrCast(memmap.page));
@@ -3649,7 +3649,7 @@ fn traceOver(params: ?std.json.Value, out: []u8) ToolResult {
 
         const cip = bridge.valFromString("cip");
         var dis_buf: [256]u8 = undefined;
-        const has_dis = if (bridge.GuiGetDisassembly) |f| f(cip, &dis_buf) != 0 else false;
+        const has_dis = if (bridge.GuiGetDisassembly) |f| f(cip, &dis_buf) != .FALSE else false;
         const dis_text = if (has_dis) bridge.cstrSlice(&dis_buf) else "???";
         const line = std.fmt.bufPrint(out[pos..], "0x{X}: {s}\n", .{ cip, dis_text }) catch break;
         pos += line.len;
