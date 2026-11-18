@@ -194,12 +194,23 @@ pub fn notifyEvent(level: []const u8, msg: []const u8) void {
     const pend_msg = std.fmt.bufPrint(&pend_buf, "[event:{s}] {s}", .{ level, msg }) catch msg;
     pendingPush(pend_msg);
 
-    // Push to SSE clients as JSON-RPC notification
+    // Push to SSE clients as JSON-RPC notification. Build it through JsonWriter
+    // so quotes, backslashes and control bytes in msg are escaped. The previous
+    // hand-rolled format string pasted msg straight into the JSON body, so any
+    // message containing a quote would have produced invalid JSON.
     var buf: [1024]u8 = undefined;
-    const json = std.fmt.bufPrint(&buf,
-        "{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{{\"level\":\"{s}\",\"data\":\"{s}\"}}}}",
-        .{ level, msg },
-    ) catch return;
+    var w = JsonWriter.init(&buf);
+    w.beginObject();
+    w.fieldStr("jsonrpc", "2.0");
+    w.fieldStr("method", "notifications/message");
+    w.key("params");
+    w.beginObject();
+    w.fieldStr("level", level);
+    w.fieldStr("data", msg);
+    w.endObject();
+    w.endObject();
+    if (w.overflow) return;
+    const json = w.slice();
     for (0..MAX_SSE_CLIENTS) |i| {
         if (sse_clients[i] != INVALID_SOCKET) {
             sseSendEvent(sse_clients[i], "message", json);
